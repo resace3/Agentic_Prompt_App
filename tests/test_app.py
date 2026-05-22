@@ -36,10 +36,7 @@ class PromptAppTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_sensor_map_persists_twenty_rows(self):
-        rows = [
-            {"sensor": f"sensor.test_{index}", "description": f"Description {index}"}
-            for index in range(20)
-        ]
+        rows = [{"sensor": f"sensor.test_{index}", "description": f"Description {index}"} for index in range(20)]
 
         save_response = self.client.put("/api/sensor-map", json={"sensors": rows})
         self.assertEqual(save_response.status_code, 200)
@@ -98,12 +95,12 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn('id="modelSelect"', html)
         self.assertIn('id="modelPrice"', html)
         self.assertNotIn('id="balanceBadge"', html)
-        self.assertNotIn('/api/openai-balance', html)
+        self.assertNotIn("/api/openai-balance", html)
         self.assertIn("OpenAI", html)
         self.assertIn("Claude", html)
         self.assertIn("gpt-4.1-nano", html)
         self.assertIn(app_module.DEFAULT_CLAUDE_MODEL, html)
-        self.assertIn('promptFlowSelectedModel.v5', html)
+        self.assertIn("promptFlowSelectedModel.v5", html)
         self.assertIn('className = "pinned-marker"', html)
 
     def test_message_uses_selected_model_and_stores_response_model_stamp(self):
@@ -314,9 +311,14 @@ class PromptAppTests(unittest.TestCase):
         expected_sleep_average = sum(record["minutes_asleep"] for record in summary["daily"]) / summary["days_returned"]
         expected_bed_average = sum(record["time_in_bed"] for record in summary["daily"]) / summary["days_returned"]
         expected_awake_average = sum(record["minutes_awake"] for record in summary["daily"]) / summary["days_returned"]
-        expected_efficiency_average = sum(record["efficiency"] for record in summary["daily"]) / summary["days_returned"]
+        expected_efficiency_average = (
+            sum(record["efficiency"] for record in summary["daily"]) / summary["days_returned"]
+        )
         self.assertEqual(summary["averages"]["sleep_label"], app_module.minutes_to_hours_label(expected_sleep_average))
-        self.assertEqual(summary["averages"]["time_in_bed_label"], app_module.minutes_to_hours_label(expected_bed_average))
+        self.assertEqual(
+            summary["averages"]["time_in_bed_label"],
+            app_module.minutes_to_hours_label(expected_bed_average),
+        )
         self.assertEqual(summary["averages"]["minutes_awake"], round(expected_awake_average, 1))
         self.assertEqual(summary["averages"]["efficiency"], round(expected_efficiency_average, 1))
 
@@ -336,8 +338,7 @@ class PromptAppTests(unittest.TestCase):
                 return SimpleNamespace(
                     id="resp_test",
                     output_text=(
-                        f"Average sleep was {expected['averages']['sleep_label']} "
-                        f"over {expected['date_range']}."
+                        f"Average sleep was {expected['averages']['sleep_label']} over {expected['date_range']}."
                     ),
                 )
 
@@ -426,7 +427,9 @@ class PromptAppTests(unittest.TestCase):
             response = self.client.post(
                 "/api/message",
                 json={
-                    "message": "look at binary_sensor.pantry_door_window in the home assistant db and give me info on it"
+                    "message": (
+                        "look at binary_sensor.pantry_door_window in the home assistant db and give me info on it"
+                    )
                 },
             )
         finally:
@@ -655,9 +658,7 @@ class PromptAppTests(unittest.TestCase):
         if not app_module.home_assistant_available():
             self.skipTest("Home Assistant API is not available.")
 
-        response = self.client.get(
-            "/api/sensor-plot?sensor=sensor.nick_r_sleep_minutes_asleep&days=30"
-        )
+        response = self.client.get("/api/sensor-plot?sensor=sensor.nick_r_sleep_minutes_asleep&days=30")
         data = response.get_json()
 
         self.assertEqual(response.status_code, 200)
@@ -676,9 +677,7 @@ class PromptAppTests(unittest.TestCase):
         if not app_module.home_assistant_available():
             self.skipTest("Home Assistant API is not available.")
 
-        response = self.client.get(
-            "/api/sensor-plot?sensor=sensor.nick_r_sleep_efficiency&days=30"
-        )
+        response = self.client.get("/api/sensor-plot?sensor=sensor.nick_r_sleep_efficiency&days=30")
         data = response.get_json()
 
         self.assertEqual(response.status_code, 200)
@@ -693,9 +692,7 @@ class PromptAppTests(unittest.TestCase):
         if not app_module.home_assistant_available():
             self.skipTest("Home Assistant API is not available.")
 
-        response = self.client.get(
-            "/api/sensor-data?sensor=sensor.nick_r_sleep_minutes_asleep&days=7&limit=20"
-        )
+        response = self.client.get("/api/sensor-data?sensor=sensor.nick_r_sleep_minutes_asleep&days=7&limit=20")
         data = response.get_json()
 
         self.assertEqual(response.status_code, 200)
@@ -720,8 +717,7 @@ class PromptAppTests(unittest.TestCase):
         end = template.index("function messageElement")
         renderer_source = template[start:end]
         script = (
-            renderer_source
-            + "\nconst input = `| Domain | WHO-aligned target / concern |\\n"
+            renderer_source + "\nconst input = `| Domain | WHO-aligned target / concern |\\n"
             "|---|---|\\n"
             "| BMI | **18.5-24.9 kg/m²** |\\n"
             "| Sleep | 7-9 hours/night |`;\n"
@@ -755,13 +751,19 @@ class PromptAppTests(unittest.TestCase):
             "}"
             "const document={createElement:(name)=>new Node(name),createElementNS:(_ns,name)=>new Node(name)};"
             + renderer_source
-            + "\nconst plot={available:true,sensor:'sensor.nick_r_sleep_minutes_asleep',cleaned:true,metric:'minutes_asleep',"
-            "samples:2,min:315,max:472,average:393.5,latest:472,date_range:'May 20-21, 2026',"
-            "points:[{timestamp:1,value:315,time:'May 20, 2026'},{timestamp:2,value:472,time:'May 21, 2026'}]};"
-            "const card=buildPlotCard(plot);"
-            "function collect(node, klass, out=[]){if(node.attrs && node.attrs.class===klass) out.push(node.textContent);"
-            "for (const child of node.children || []) collect(child, klass, out); return out;}"
-            "process.stdout.write(JSON.stringify({axis:collect(card,'plot-axis-label'),ticks:collect(card,'plot-tick-label')}));"
+            + (
+                "\nconst plot={available:true,sensor:'sensor.nick_r_sleep_minutes_asleep',cleaned:true,"
+                "metric:'minutes_asleep',"
+            )
+            + "samples:2,min:315,max:472,average:393.5,latest:472,date_range:'May 20-21, 2026',"
+            + "points:[{timestamp:1,value:315,time:'May 20, 2026'},{timestamp:2,value:472,time:'May 21, 2026'}]};"
+            + "const card=buildPlotCard(plot);"
+            + "function collect(node, klass, out=[]){"
+            + "if(node.attrs && node.attrs.class===klass) out.push(node.textContent);"
+            + "for (const child of node.children || []) collect(child, klass, out); return out;}"
+            + "process.stdout.write(JSON.stringify({"
+            + "axis:collect(card,'plot-axis-label'),ticks:collect(card,'plot-tick-label')"
+            + "}));"
         )
 
         result = subprocess.run(
@@ -783,22 +785,33 @@ class PromptAppTests(unittest.TestCase):
         renderer_source = template[start:end]
         script = (
             "class Node {"
-            "constructor(name){this.name=name;this.children=[];this.attrs={};this.textContent='';this.className='';this.src='';this.alt='';}"
+            "constructor(name){"
+            "this.name=name;this.children=[];this.attrs={};this.textContent='';"
+            "this.className='';this.src='';this.alt='';"
+            "}"
             "appendChild(node){this.children.push(node);return node;}"
             "append(...nodes){this.children.push(...nodes);}"
             "setAttribute(key,value){this.attrs[key]=String(value);}"
             "}"
             "const document={createElement:(name)=>new Node(name),createElementNS:(_ns,name)=>new Node(name)};"
             + renderer_source
-            + "\nconst plot={available:true,sensor:'sensor.nick_r_sleep_minutes_asleep',cleaned:true,metric:'minutes_asleep',"
-            "samples:2,min:315,max:472,average:393.5,latest:472,date_range:'May 20-21, 2026',"
-            "python_image:{data_url:'data:image/png;base64,abc123',renderer:'matplotlib',x_axis_label:'Date',y_axis_label:'Minutes Asleep',title:'Sleep'},"
-            "points:[{timestamp:1,value:315,time:'May 20, 2026'},{timestamp:2,value:472,time:'May 21, 2026'}]};"
-            "const card=buildPlotCard(plot);"
-            "function collect(node, out=[]){if(node.name==='img') out.push({src:node.src, alt:node.alt, klass:node.className});"
-            "for (const child of node.children || []) collect(child, out); return out;}"
-            "function texts(node, out=[]){if(node.textContent) out.push(node.textContent); for (const child of node.children || []) texts(child, out); return out;}"
-            "process.stdout.write(JSON.stringify({images:collect(card), text:texts(card)}));"
+            + (
+                "\nconst plot={available:true,sensor:'sensor.nick_r_sleep_minutes_asleep',cleaned:true,"
+                "metric:'minutes_asleep',"
+            )
+            + "samples:2,min:315,max:472,average:393.5,latest:472,date_range:'May 20-21, 2026',"
+            + "python_image:{data_url:'data:image/png;base64,abc123',renderer:'matplotlib',"
+            + "x_axis_label:'Date',y_axis_label:'Minutes Asleep',title:'Sleep'},"
+            + "points:[{timestamp:1,value:315,time:'May 20, 2026'},{timestamp:2,value:472,time:'May 21, 2026'}]};"
+            + "const card=buildPlotCard(plot);"
+            + "function collect(node, out=[]){"
+            + "if(node.name==='img') out.push({src:node.src, alt:node.alt, klass:node.className});"
+            + "for (const child of node.children || []) collect(child, out); return out;}"
+            + "function texts(node, out=[]){"
+            + "if(node.textContent) out.push(node.textContent); "
+            + "for (const child of node.children || []) texts(child, out); return out;"
+            + "}"
+            + "process.stdout.write(JSON.stringify({images:collect(card), text:texts(card)}));"
         )
 
         result = subprocess.run(
@@ -810,8 +823,8 @@ class PromptAppTests(unittest.TestCase):
 
         self.assertIn('"src":"data:image/png;base64,abc123"', result.stdout)
         self.assertIn('"klass":"python-plot-image"', result.stdout)
-        self.assertIn('Rendered with Python (matplotlib)', result.stdout)
-        self.assertIn('Y: Minutes Asleep', result.stdout)
+        self.assertIn("Rendered with Python (matplotlib)", result.stdout)
+        self.assertIn("Y: Minutes Asleep", result.stdout)
 
 
 if __name__ == "__main__":

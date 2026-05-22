@@ -15,7 +15,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import matplotlib
+
 matplotlib.use("Agg")
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from statistics import mean
@@ -285,8 +287,7 @@ def load_secret_value(secret_name, env_name, provider_label):
             return str(api_key).strip()
 
     raise RuntimeError(
-        f"{provider_label} API key not found. Add {secret_name} to /config/secrets.yaml "
-        f"or set {env_name}."
+        f"{provider_label} API key not found. Add {secret_name} to /config/secrets.yaml or set {env_name}."
     )
 
 
@@ -470,10 +471,7 @@ def should_make_plot(user_text):
 def should_show_sensor_data(user_text):
     lowered = user_text.lower()
     mapped_history_terms = {"look at", "give me info", "tell me about", "history for", "opened", "closed"}
-    explicit_terms = [
-        term for term in SENSOR_DATA_REQUEST_TERMS
-        if term not in mapped_history_terms
-    ]
+    explicit_terms = [term for term in SENSOR_DATA_REQUEST_TERMS if term not in mapped_history_terms]
     if any(term in lowered for term in explicit_terms):
         return True
     return any(term in lowered for term in mapped_history_terms) and prompt_mentions_mapped_sensor(user_text)
@@ -520,6 +518,7 @@ def requested_days_from_text(user_text, default_days=DEFAULT_SLEEP_DAYS):
 
 def discover_sleep_entities():
     states = home_assistant_api_request("states", timeout=30)
+
     def score(entity_id):
         lowered = entity_id.lower()
         if any(term in lowered for term in SLEEP_ENTITY_EXCLUDE_TERMS):
@@ -1256,11 +1255,7 @@ def query_sensor_history(entity_id, days=7, limit=80):
 
 def relevant_sensor_map_rows(user_text, max_rows=MAX_CONTEXT_SENSORS):
     rows = load_sensor_map()["sensors"]
-    scored = [
-        (score_sensor_for_prompt(row, user_text), row)
-        for row in rows
-        if row.get("sensor")
-    ]
+    scored = [(score_sensor_for_prompt(row, user_text), row) for row in rows if row.get("sensor")]
     exact_matches = [row for score, row in scored if score >= 100]
     if exact_matches:
         return exact_matches[:max_rows]
@@ -1381,14 +1376,8 @@ def sleep_sensor_alignment(rows, completed_sleep):
         start_ts = sleep_start.timestamp()
         end_ts = start_ts + (record.get("time_in_bed") or 0) * 60
         before_start_ts = start_ts - 4 * 60 * 60
-        before_sleep = [
-            row for row in active_rows
-            if before_start_ts <= row.get("timestamp", 0) < start_ts
-        ]
-        during_sleep = [
-            row for row in active_rows
-            if start_ts <= row.get("timestamp", 0) <= end_ts
-        ]
+        before_sleep = [row for row in active_rows if before_start_ts <= row.get("timestamp", 0) < start_ts]
+        during_sleep = [row for row in active_rows if start_ts <= row.get("timestamp", 0) <= end_ts]
 
         alignment.append(
             {
@@ -1442,10 +1431,7 @@ def summarize_mapped_sensor_history(row, days, completed_sleep=None):
             "first_seen_local": rows[0].get("local_time") or rows[0].get("time"),
             "last_seen_local": rows[-1].get("local_time") or rows[-1].get("time"),
             "latest_state": rows[-1].get("state"),
-            "state_counts": [
-                {"state": state, "count": count}
-                for state, count in state_counts.most_common(12)
-            ],
+            "state_counts": [{"state": state, "count": count} for state, count in state_counts.most_common(12)],
             "daily_active_events": daily[-60:],
             "recent_rows": rows[-20:],
         }
@@ -1466,10 +1452,7 @@ def summarize_mapped_sensor_histories(user_text, days, completed_sleep=None):
     rows = relevant_sensor_map_rows(user_text)
     if not rows:
         return []
-    return [
-        summarize_mapped_sensor_history(row, days=days, completed_sleep=completed_sleep)
-        for row in rows
-    ]
+    return [summarize_mapped_sensor_history(row, days=days, completed_sleep=completed_sleep) for row in rows]
 
 
 def score_sensor_for_prompt(row, user_text):
@@ -1487,7 +1470,8 @@ def score_sensor_for_prompt(row, user_text):
         token
         for token in re.split(r"[^a-z0-9]+", searchable)
         if len(token) > 2
-        and token not in {
+        and token
+        not in {
             "sensor",
             "binary",
             "count",
@@ -1625,10 +1609,7 @@ def summarize_home_assistant_prompt_context(user_text, days):
     mapped_history_rows = mapped_rows
     if include_sleep:
         sleep_entities = set(SLEEP_METRIC_ENTITIES.values())
-        mapped_history_rows = [
-            row for row in mapped_rows
-            if row.get("sensor") not in sleep_entities
-        ]
+        mapped_history_rows = [row for row in mapped_rows if row.get("sensor") not in sleep_entities]
     include_mapped_history = should_include_mapped_sensor_history(
         user_text,
         mapped_rows=mapped_history_rows,
@@ -1866,9 +1847,7 @@ def load_chat_store():
     stored_conversations = payload.get("conversations", {})
     if isinstance(stored_conversations, list):
         stored_conversations = {
-            item.get("id", str(uuid.uuid4())): item
-            for item in stored_conversations
-            if isinstance(item, dict)
+            item.get("id", str(uuid.uuid4())): item for item in stored_conversations if isinstance(item, dict)
         }
     if not isinstance(stored_conversations, dict):
         return
@@ -1962,6 +1941,18 @@ def index():
         providers=provider_catalog(),
         models=model_catalog(),
         pricing_source=MODEL_PRICING_SOURCE,
+    )
+
+
+@app.get("/api/health")
+def health():
+    return jsonify(
+        {
+            "ok": True,
+            "default_provider": DEFAULT_PROVIDER,
+            "default_model": DEFAULT_MODEL,
+            "home_assistant_api": bool(home_assistant_token()),
+        }
     )
 
 
