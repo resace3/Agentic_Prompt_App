@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+chat_history.json
+sensor_map.json
+*.bak

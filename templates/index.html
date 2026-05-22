@@ -1,0 +1,1065 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Prompt Flow</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="chat-sidebar" aria-label="Saved chats">
+        <div class="sidebar-header">
+          <div>
+            <h2>Chats</h2>
+            <span id="chatCount" class="chat-count">0 saved</span>
+          </div>
+          <button id="newChatButton" class="new-chat-button" type="button" title="New chat">New</button>
+        </div>
+        <div id="chatList" class="chat-list"></div>
+      </aside>
+
+      <section class="main-pane">
+        <header class="topbar">
+          <div class="brand-block">
+            <h1>Prompt Flow</h1>
+            <p>Read-only sensor context with per-response model stamps.</p>
+          </div>
+          <div class="topbar-actions">
+            <label class="provider-picker" for="providerSelect">
+              <span>Provider</span>
+              <select id="providerSelect" name="provider">
+                {% for provider in providers %}
+                  <option value="{{ provider.id }}" {% if provider.id == default_provider %}selected{% endif %}>
+                    {{ provider.label }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="model-picker" for="modelSelect">
+              <span>Model</span>
+              <select id="modelSelect" name="model"></select>
+              <small id="modelPrice" class="model-price"></small>
+            </label>
+            <button id="resetButton" type="button" title="Start a new chat">Reset</button>
+          </div>
+        </header>
+
+        <nav class="tabs" aria-label="Main sections">
+          <button class="tab active" type="button" data-tab="prompts">Prompts</button>
+          <button class="tab" type="button" data-tab="sensorMaps">Sensor Maps</button>
+          <button class="tab" type="button" data-tab="sensorPlots">Sensor Plots</button>
+        </nav>
+
+        <section id="promptsPanel" class="tab-panel active">
+          <section id="messages" class="messages" aria-live="polite"></section>
+
+          <form id="promptForm" class="composer">
+            <textarea
+              id="messageInput"
+              name="message"
+              rows="3"
+              placeholder="Type your prompt or reply..."
+              required
+            ></textarea>
+            <button id="sendButton" type="submit">Send</button>
+          </form>
+        </section>
+
+        <section id="sensorMapsPanel" class="tab-panel sensor-panel">
+          <div class="sensor-toolbar">
+            <div class="sensor-actions">
+              <button id="addSensorRow" type="button">Add Row</button>
+              <button id="saveSensorMap" type="button">Save</button>
+            </div>
+            <span id="sensorSaveStatus" class="save-status">Not loaded</span>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Sensor</th>
+                  <th>Description</th>
+                  <th class="actions-heading">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sensorRows">
+                <tr>
+                  <td colspan="3">Loading sensors...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="sensorPlotsPanel" class="tab-panel plot-tab-panel">
+          <section class="plot-panel">
+            <div class="plot-controls">
+              <label>
+                Sensor
+                <select id="plotSensorSelect"></select>
+              </label>
+              <label>
+                Days
+                <input id="plotDaysInput" type="number" min="1" max="365" value="30">
+              </label>
+              <button id="plotButton" type="button">Plot</button>
+            </div>
+            <div id="plotArea" class="plot-area">Choose a sensor to plot its numeric history.</div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      const messagesEl = document.querySelector("#messages");
+      const form = document.querySelector("#promptForm");
+      const input = document.querySelector("#messageInput");
+      const sendButton = document.querySelector("#sendButton");
+      const resetButton = document.querySelector("#resetButton");
+      const providerSelect = document.querySelector("#providerSelect");
+      const modelSelect = document.querySelector("#modelSelect");
+      const modelPrice = document.querySelector("#modelPrice");
+      const sensorRows = document.querySelector("#sensorRows");
+      const addSensorRowButton = document.querySelector("#addSensorRow");
+      const saveSensorMapButton = document.querySelector("#saveSensorMap");
+      const sensorSaveStatus = document.querySelector("#sensorSaveStatus");
+      const plotSensorSelect = document.querySelector("#plotSensorSelect");
+      const plotDaysInput = document.querySelector("#plotDaysInput");
+      const plotButton = document.querySelector("#plotButton");
+      const plotArea = document.querySelector("#plotArea");
+      const tabs = document.querySelectorAll(".tab");
+      const promptsPanel = document.querySelector("#promptsPanel");
+      const sensorMapsPanel = document.querySelector("#sensorMapsPanel");
+      const sensorPlotsPanel = document.querySelector("#sensorPlotsPanel");
+      const chatList = document.querySelector("#chatList");
+      const chatCount = document.querySelector("#chatCount");
+      const newChatButton = document.querySelector("#newChatButton");
+
+      const PROVIDER_OPTIONS = {{ providers | tojson }};
+      const MODEL_OPTIONS = {{ models | tojson }};
+      const DEFAULT_PROVIDER = {{ default_provider | tojson }};
+      const DEFAULT_MODEL = {{ default_model | tojson }};
+      const PROVIDER_STORAGE_KEY = "promptFlowSelectedProvider.v1";
+      const MODEL_STORAGE_KEY = "promptFlowSelectedModel.v5";
+      let messages = [];
+      let chats = [];
+      let activeChatId = null;
+      let sensorMapRows = [];
+      let sensorMapLoaded = false;
+      let typingTimer = null;
+      let saveTimer = null;
+      let loadingStageTimer = null;
+
+      function scrollMessages() {
+        messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+      }
+
+      function providerById(providerId) {
+        return PROVIDER_OPTIONS.find((provider) => provider.id === providerId)
+          || PROVIDER_OPTIONS.find((provider) => provider.id === DEFAULT_PROVIDER)
+          || PROVIDER_OPTIONS[0];
+      }
+
+      function selectedProvider() {
+        return providerById(providerSelect.value);
+      }
+
+      function modelsForProvider(providerId) {
+        return MODEL_OPTIONS.filter((model) => model.provider === providerId);
+      }
+
+      function modelById(modelId, providerId = null) {
+        const candidates = providerId ? modelsForProvider(providerId) : MODEL_OPTIONS;
+        return candidates.find((model) => model.id === modelId)
+          || MODEL_OPTIONS.find((model) => model.id === modelId)
+          || modelsForProvider(DEFAULT_PROVIDER).find((model) => model.id === DEFAULT_MODEL)
+          || MODEL_OPTIONS[0];
+      }
+
+      function selectedModel() {
+        const provider = selectedProvider();
+        return modelById(modelSelect.value, provider.id);
+      }
+
+      function renderModelOptions(preferredModelId = null) {
+        const provider = selectedProvider();
+        const models = modelsForProvider(provider.id);
+        modelSelect.innerHTML = "";
+
+        for (const model of models) {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = model.label;
+          modelSelect.appendChild(option);
+        }
+
+        const preferred = models.find((model) => model.id === preferredModelId)
+          || models.find((model) => model.id === provider.default_model)
+          || models[0];
+        if (preferred) {
+          modelSelect.value = preferred.id;
+        }
+        updateModelPrice();
+      }
+
+      function formatPrice(value) {
+        if (value === null || value === undefined || value === "") {
+          return "-";
+        }
+        const numeric = Number(value);
+        return `$${numeric.toLocaleString(undefined, { maximumFractionDigits: 3 })}`;
+      }
+
+      function pricingLine(model) {
+        if (!model) {
+          return "";
+        }
+        const cached = model.cached_input_per_1m === null || model.cached_input_per_1m === undefined
+          ? ""
+          : ` | cached ${formatPrice(model.cached_input_per_1m)}`;
+        return `Input ${formatPrice(model.input_per_1m)}${cached} | output ${formatPrice(model.output_per_1m)} per 1M tokens`;
+      }
+
+      function updateModelPrice() {
+        const provider = selectedProvider();
+        const model = selectedModel();
+        modelPrice.textContent = pricingLine(model);
+        modelPrice.title = model.note || provider.pricing_note || "";
+        localStorage.setItem(PROVIDER_STORAGE_KEY, provider.id);
+        localStorage.setItem(MODEL_STORAGE_KEY, model.id);
+      }
+
+      function modelLabelForMessage(message) {
+        const providerLabel = message.provider_label || (message.provider ? providerById(message.provider).label : "");
+        if (message.model_label) {
+          return providerLabel ? `${providerLabel} · ${message.model_label}` : message.model_label;
+        }
+        if (message.model) {
+          const model = modelById(message.model, message.provider || null);
+          const label = model ? model.label : message.model;
+          return providerLabel ? `${providerLabel} · ${label}` : label;
+        }
+        return "Assistant";
+      }
+
+      function modelStampText(message) {
+        const model = message.model_pricing || (message.model ? modelById(message.model, message.provider || null) : null);
+        if (!message.model && !message.model_label && !model) {
+          return "";
+        }
+        const providerLabel = message.provider_label || (model && model.provider_label) || (message.provider ? providerById(message.provider).label : "");
+        const label = message.model_label || (model ? model.label : message.model);
+        const id = message.model || (model ? model.id : "");
+        const price = pricingLine(model);
+        const prefix = providerLabel ? `${providerLabel} · ` : "";
+        return `${prefix}${label}${id ? ` (${id})` : ""}${price ? ` | ${price}` : ""}`;
+      }
+
+      function buildPlotCard(plot) {
+        const card = document.createElement("div");
+        card.className = "plot-card";
+
+        const title = document.createElement("div");
+        title.className = "plot-title";
+        title.textContent = plot && plot.sensor
+          ? `${plot.sensor}${plot.cleaned ? " (cleaned completed nights)" : ""}`
+          : "Sensor plot";
+        card.appendChild(title);
+
+        if (!plot || !plot.available || !plot.points || !plot.points.length) {
+          const empty = document.createElement("div");
+          empty.className = "plot-empty";
+          empty.textContent = (plot && plot.message) || "No numeric plot data available.";
+          card.appendChild(empty);
+          return card;
+        }
+
+        if (plot.python_image && plot.python_image.data_url) {
+          const image = document.createElement("img");
+          image.className = "python-plot-image";
+          image.src = plot.python_image.data_url;
+          image.alt = plot.python_image.title || `${title.textContent} plotted with Python`;
+          card.appendChild(image);
+
+          const meta = document.createElement("div");
+          meta.className = "plot-renderer";
+          meta.textContent = `Rendered with Python (${plot.python_image.renderer || "matplotlib"}) | X: ${plot.python_image.x_axis_label || "Date"} | Y: ${plot.python_image.y_axis_label || "Value"}`;
+          card.appendChild(meta);
+
+          const stats = document.createElement("div");
+          stats.className = "plot-stats";
+          const range = plot.date_range ? ` | ${plot.date_range}` : "";
+          stats.textContent = `${plot.samples} samples${range} | min ${plot.min} | avg ${plot.average} | max ${plot.max} | latest ${plot.latest}`;
+          card.appendChild(stats);
+          return card;
+        }
+
+        const points = plot.points;
+        const width = 720;
+        const height = 280;
+        const padTop = 24;
+        const padRight = 28;
+        const padBottom = 58;
+        const padLeft = 72;
+        const xs = points.map((point) => Number(point.timestamp));
+        const ys = points.map((point) => Number(point.value));
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        const yRange = maxY - minY || 1;
+        const xRange = maxX - minX || 1;
+
+        const coords = points.map((point) => {
+          const x = padLeft + ((Number(point.timestamp) - minX) / xRange) * (width - padLeft - padRight);
+          const y = height - padBottom - ((Number(point.value) - minY) / yRange) * (height - padTop - padBottom);
+          return [x, y];
+        });
+        const path = coords.map(([x, y], index) => `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("aria-label", `${title.textContent} over time`);
+
+        const axis = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        axis.setAttribute("d", `M ${padLeft} ${padTop} L ${padLeft} ${height - padBottom} L ${width - padRight} ${height - padBottom}`);
+        axis.setAttribute("class", "plot-axis");
+        svg.appendChild(axis);
+
+        function addPlotText(text, x, y, className, options = {}) {
+          const node = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          node.textContent = text;
+          node.setAttribute("x", x);
+          node.setAttribute("y", y);
+          node.setAttribute("class", className);
+          if (options.anchor) {
+            node.setAttribute("text-anchor", options.anchor);
+          }
+          if (options.transform) {
+            node.setAttribute("transform", options.transform);
+          }
+          svg.appendChild(node);
+          return node;
+        }
+
+        const yAxisLabel = plot.metric
+          ? plot.metric.replaceAll("_", " ")
+          : "Value";
+        addPlotText("Date", width / 2, height - 14, "plot-axis-label", { anchor: "middle" });
+        addPlotText(yAxisLabel, 18, height / 2, "plot-axis-label", {
+          anchor: "middle",
+          transform: `rotate(-90 18 ${height / 2})`,
+        });
+        addPlotText(String(maxY), padLeft - 10, padTop + 4, "plot-tick-label", { anchor: "end" });
+        addPlotText(String(minY), padLeft - 10, height - padBottom + 4, "plot-tick-label", { anchor: "end" });
+        addPlotText(points[0].time, padLeft, height - padBottom + 22, "plot-tick-label");
+        addPlotText(points[points.length - 1].time, width - padRight, height - padBottom + 22, "plot-tick-label", { anchor: "end" });
+
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        line.setAttribute("d", path);
+        line.setAttribute("class", "plot-line");
+        svg.appendChild(line);
+
+        for (const [x, y] of coords.filter((_, index) => index % Math.ceil(coords.length / 18) === 0)) {
+          const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          dot.setAttribute("cx", x.toFixed(1));
+          dot.setAttribute("cy", y.toFixed(1));
+          dot.setAttribute("r", "3");
+          dot.setAttribute("class", "plot-dot");
+          svg.appendChild(dot);
+        }
+
+        const stats = document.createElement("div");
+        stats.className = "plot-stats";
+        const range = plot.date_range ? ` | ${plot.date_range}` : "";
+        stats.textContent = `${plot.samples} samples${range} | min ${plot.min} | avg ${plot.average} | max ${plot.max} | latest ${plot.latest}`;
+
+        card.append(svg, stats);
+        return card;
+      }
+
+      function buildSensorDataCard(sensorData) {
+        const card = document.createElement("div");
+        card.className = "sensor-data-card";
+
+        const title = document.createElement("div");
+        title.className = "plot-title";
+        title.textContent = sensorData && sensorData.sensor ? sensorData.sensor : "Sensor data";
+        card.appendChild(title);
+
+        if (!sensorData || !sensorData.available || !sensorData.rows || !sensorData.rows.length) {
+          const empty = document.createElement("div");
+          empty.className = "plot-empty";
+          empty.textContent = (sensorData && sensorData.message) || "No sensor rows available.";
+          card.appendChild(empty);
+          return card;
+        }
+
+        if (sensorData.numeric_summary) {
+          const stats = document.createElement("div");
+          stats.className = "plot-stats";
+          stats.textContent = `${sensorData.samples} rows | min ${sensorData.numeric_summary.min} | avg ${sensorData.numeric_summary.average} | max ${sensorData.numeric_summary.max} | latest ${sensorData.numeric_summary.latest}`;
+          card.appendChild(stats);
+        }
+
+        const wrap = document.createElement("div");
+        wrap.className = "embedded-table-wrap";
+        const table = document.createElement("table");
+        table.className = "embedded-data-table";
+        table.innerHTML = "<thead><tr><th>Time</th><th>State</th><th>Numeric</th></tr></thead>";
+        const body = document.createElement("tbody");
+
+        for (const row of sensorData.rows.slice(-80)) {
+          const tr = document.createElement("tr");
+          const time = document.createElement("td");
+          const state = document.createElement("td");
+          const numeric = document.createElement("td");
+          time.textContent = row.time;
+          state.textContent = row.state;
+          numeric.textContent = row.numeric_value === null || row.numeric_value === undefined ? "" : row.numeric_value;
+          tr.append(time, state, numeric);
+          body.appendChild(tr);
+        }
+
+        table.appendChild(body);
+        wrap.appendChild(table);
+        card.appendChild(wrap);
+        return card;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function renderInlineMarkdown(value) {
+        return escapeHtml(value)
+          .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+          .replace(/\*(.+?)\*/g, "<em>$1</em>")
+          .replace(/`([^`]+)`/g, "<code>$1</code>");
+      }
+
+      function splitMarkdownTableRow(line) {
+        return line
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((cell) => cell.trim());
+      }
+
+      function isMarkdownTableSeparator(line) {
+        const cells = splitMarkdownTableRow(line);
+        return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+      }
+
+      function isMarkdownTableRow(line) {
+        const trimmed = line.trim();
+        return trimmed.startsWith("|") && trimmed.endsWith("|") && splitMarkdownTableRow(trimmed).length > 1;
+      }
+
+      function renderMarkdownTable(lines, startIndex) {
+        const header = splitMarkdownTableRow(lines[startIndex]);
+        const bodyRows = [];
+        let index = startIndex + 2;
+
+        while (index < lines.length && isMarkdownTableRow(lines[index])) {
+          bodyRows.push(splitMarkdownTableRow(lines[index]));
+          index += 1;
+        }
+
+        const headerHtml = header
+          .map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`)
+          .join("");
+        const bodyHtml = bodyRows
+          .map((row) => {
+            const cells = header.map((_, cellIndex) => row[cellIndex] || "");
+            return `<tr>${cells.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join("")}</tr>`;
+          })
+          .join("");
+
+        return {
+          html: `<div class="markdown-table-wrap"><table class="markdown-table"><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`,
+          nextIndex: index,
+        };
+      }
+
+      function markdownToHtml(markdown) {
+        const lines = String(markdown || "").split(/\r?\n/);
+        const html = [];
+        let inList = false;
+
+        function closeList() {
+          if (inList) {
+            html.push("</ul>");
+            inList = false;
+          }
+        }
+
+        for (let index = 0; index < lines.length; index += 1) {
+          const line = lines[index];
+          const trimmed = line.trim();
+          if (!trimmed) {
+            closeList();
+            continue;
+          }
+
+          if (
+            isMarkdownTableRow(trimmed) &&
+            index + 1 < lines.length &&
+            isMarkdownTableSeparator(lines[index + 1])
+          ) {
+            closeList();
+            const table = renderMarkdownTable(lines, index);
+            html.push(table.html);
+            index = table.nextIndex - 1;
+            continue;
+          }
+
+          const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+          if (heading) {
+            closeList();
+            const level = Math.min(heading[1].length + 2, 4);
+            html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+            continue;
+          }
+
+          const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+          if (bullet) {
+            if (!inList) {
+              html.push("<ul>");
+              inList = true;
+            }
+            html.push(`<li>${renderInlineMarkdown(bullet[1])}</li>`);
+            continue;
+          }
+
+          closeList();
+          html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
+        }
+
+        closeList();
+        return html.join("");
+      }
+
+      function messageElement(message, options = {}) {
+        const bubble = document.createElement("article");
+        bubble.className = `message ${message.role}`;
+        if (options.enter) {
+          bubble.classList.add("enter");
+        }
+        if (options.loading) {
+          bubble.classList.add("loading");
+        }
+
+        const role = document.createElement("div");
+        role.className = "role";
+        role.textContent = message.role === "user" ? "You" : modelLabelForMessage(message);
+
+        const content = document.createElement("div");
+        content.className = "content";
+        if (options.loading) {
+          content.innerHTML = '<span class="loader" aria-label="Loading"></span><span class="loading-text">Reading prompt...</span>';
+        } else {
+          content.innerHTML = message.role === "assistant"
+            ? markdownToHtml(message.content)
+            : escapeHtml(message.content);
+        }
+
+        bubble.append(role, content);
+        if (message.role === "assistant") {
+          const stampText = modelStampText(message);
+          if (stampText) {
+            const stamp = document.createElement("div");
+            stamp.className = "model-stamp";
+            stamp.textContent = stampText;
+            bubble.appendChild(stamp);
+          }
+        }
+        if (message.plot) {
+          bubble.appendChild(buildPlotCard(message.plot));
+        }
+        if (message.sensor_data) {
+          bubble.appendChild(buildSensorDataCard(message.sensor_data));
+        }
+        return bubble;
+      }
+
+      function renderMessages(nextMessages) {
+        messages = nextMessages;
+        clearInterval(typingTimer);
+        clearInterval(loadingStageTimer);
+        messagesEl.innerHTML = "";
+
+        if (!messages.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "Start with a prompt, then keep replying to shape the result.";
+          messagesEl.appendChild(empty);
+          return;
+        }
+
+        for (const message of messages) {
+          messagesEl.appendChild(messageElement(message));
+        }
+
+        scrollMessages();
+      }
+
+      function formatChatDate(value) {
+        if (!value) return "";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "";
+        return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      }
+
+      function updateChats(nextChats, nextActiveChatId = activeChatId) {
+        chats = nextChats || [];
+        activeChatId = nextActiveChatId || activeChatId;
+        chatCount.textContent = `${chats.length} saved`;
+        chatList.innerHTML = "";
+
+        if (!chats.length) {
+          const empty = document.createElement("div");
+          empty.className = "chat-empty";
+          empty.textContent = "No saved chats yet.";
+          chatList.appendChild(empty);
+          return;
+        }
+
+        for (const chat of chats) {
+          const row = document.createElement("div");
+          row.tabIndex = 0;
+          row.setAttribute("role", "button");
+          row.className = "chat-row";
+          row.classList.toggle("active", chat.id === activeChatId);
+          row.title = chat.title || "New chat";
+          row.addEventListener("click", () => selectChat(chat.id));
+          row.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              selectChat(chat.id);
+            }
+          });
+
+          const text = document.createElement("span");
+          text.className = "chat-row-text";
+
+          const title = document.createElement("span");
+          title.className = "chat-title";
+          if (chat.pinned) {
+            const pinMarker = document.createElement("span");
+            pinMarker.className = "pinned-marker";
+            pinMarker.textContent = "⌖";
+            pinMarker.title = "Pinned chat";
+            pinMarker.setAttribute("aria-label", "Pinned chat");
+            title.appendChild(pinMarker);
+          }
+          title.append(document.createTextNode(chat.title || "New chat"));
+
+          const meta = document.createElement("span");
+          meta.className = "chat-meta";
+          const dateLabel = formatChatDate(chat.updated_at);
+          meta.textContent = [dateLabel, `${chat.message_count || 0} messages`].filter(Boolean).join(" | ");
+          text.append(title, meta);
+
+          const actions = document.createElement("span");
+          actions.className = "chat-actions";
+
+          const pin = document.createElement("button");
+          pin.type = "button";
+          pin.className = "chat-action";
+          pin.textContent = chat.pinned ? "Unpin" : "Pin";
+          pin.title = chat.pinned ? "Unpin chat" : "Pin chat";
+          pin.addEventListener("click", (event) => {
+            event.stopPropagation();
+            togglePinChat(chat.id, !chat.pinned);
+          });
+
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "chat-action danger";
+          remove.textContent = "Del";
+          remove.title = "Delete chat";
+          remove.addEventListener("click", (event) => {
+            event.stopPropagation();
+            deleteChat(chat.id);
+          });
+
+          actions.append(pin, remove);
+          row.append(text, actions);
+          chatList.appendChild(row);
+        }
+      }
+
+      async function selectChat(chatId) {
+        if (!chatId || chatId === activeChatId) return;
+        const response = await fetch(`/api/messages?chat_id=${encodeURIComponent(chatId)}`);
+        const data = await response.json();
+        if (!response.ok) {
+          return;
+        }
+        activeChatId = data.active_chat_id || chatId;
+        updateChats(data.chats || chats, activeChatId);
+        renderMessages(data.messages || []);
+        input.focus();
+      }
+
+      async function createNewChat() {
+        const response = await fetch("/api/chats", { method: "POST" });
+        const data = await response.json();
+        if (!response.ok) return;
+        updateChats(data.chats || [], data.active_chat_id);
+        renderMessages(data.messages || []);
+        input.focus();
+      }
+
+      async function togglePinChat(chatId, pinned) {
+        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pinned }),
+        });
+        const data = await response.json();
+        if (!response.ok) return;
+        updateChats(data.chats || chats, data.active_chat_id || activeChatId);
+      }
+
+      async function deleteChat(chatId) {
+        if (!window.confirm("Delete this chat?")) return;
+        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
+        const data = await response.json();
+        if (!response.ok) return;
+        updateChats(data.chats || [], data.active_chat_id);
+        renderMessages(data.messages || []);
+        input.focus();
+      }
+
+      function appendMessage(message, options = {}) {
+        if (messagesEl.querySelector(".empty")) {
+          messagesEl.innerHTML = "";
+        }
+        messages.push(message);
+        const bubble = messageElement(message, options);
+        messagesEl.appendChild(bubble);
+        scrollMessages();
+        return bubble;
+      }
+
+      function typeInto(element, text, onDone) {
+        const content = element.querySelector(".content");
+        let index = 0;
+        content.textContent = "";
+        clearInterval(typingTimer);
+        typingTimer = setInterval(() => {
+          const chunkSize = text.length > 800 ? 8 : 4;
+          index = Math.min(index + chunkSize, text.length);
+          content.innerHTML = markdownToHtml(text.slice(0, index));
+          scrollMessages();
+          if (index >= text.length) {
+            clearInterval(typingTimer);
+            typingTimer = null;
+            onDone();
+          }
+        }, 12);
+      }
+
+      function startLoadingStages(bubble, promptText) {
+        const loadingText = bubble.querySelector(".loading-text");
+        const lowered = promptText.toLowerCase();
+        const provider = selectedProvider();
+        const model = selectedModel();
+        const stages = ["Reading prompt", "Checking sensor map"];
+        if (/(home assistant|database|sleep|bed|sensor)/.test(lowered)) {
+          stages.push("Reading Home Assistant summaries");
+        }
+        if (/(plot|graph|chart|visuali[sz]e)/.test(lowered)) {
+          stages.push("Preparing plot data");
+        }
+        if (/(show sensor data|raw sensor data|sensor data|show readings|latest readings)/.test(lowered)) {
+          stages.push("Loading raw sensor rows");
+        }
+        stages.push(`Calling ${provider.label} · ${model.label}`, "Composing response");
+
+        let index = 0;
+        loadingText.textContent = `${stages[index]}...`;
+        clearInterval(loadingStageTimer);
+        loadingStageTimer = setInterval(() => {
+          index = Math.min(index + 1, stages.length - 1);
+          loadingText.textContent = `${stages[index]}...`;
+        }, 1200);
+      }
+
+      async function loadMessages() {
+        const response = await fetch("/api/messages");
+        const data = await response.json();
+        updateChats(data.chats || [], data.active_chat_id);
+        renderMessages(data.messages || []);
+      }
+
+      function setSaveStatus(text, state = "") {
+        sensorSaveStatus.textContent = text;
+        sensorSaveStatus.dataset.state = state;
+      }
+
+      function syncPlotSensorOptions() {
+        const current = plotSensorSelect.value;
+        plotSensorSelect.innerHTML = "";
+
+        for (const row of sensorMapRows) {
+          if (!row.sensor) continue;
+          const option = document.createElement("option");
+          option.value = row.sensor;
+          option.textContent = row.sensor;
+          plotSensorSelect.appendChild(option);
+        }
+
+        if ([...plotSensorSelect.options].some((option) => option.value === current)) {
+          plotSensorSelect.value = current;
+        }
+      }
+
+      function renderSensorRows() {
+        sensorRows.innerHTML = "";
+
+        if (!sensorMapRows.length) {
+          const row = document.createElement("tr");
+          row.innerHTML = '<td colspan="3">No sensor map rows yet.</td>';
+          sensorRows.appendChild(row);
+          syncPlotSensorOptions();
+          return;
+        }
+
+        sensorMapRows.forEach((item, index) => {
+          const row = document.createElement("tr");
+          const sensorCell = document.createElement("td");
+          const descriptionCell = document.createElement("td");
+          const actionCell = document.createElement("td");
+
+          const sensorInput = document.createElement("input");
+          sensorInput.className = "table-input sensor-input";
+          sensorInput.value = item.sensor || "";
+          sensorInput.placeholder = "sensor.example";
+          sensorInput.addEventListener("input", () => {
+            sensorMapRows[index].sensor = sensorInput.value;
+            markSensorMapDirty();
+            syncPlotSensorOptions();
+          });
+
+          const descriptionInput = document.createElement("textarea");
+          descriptionInput.className = "table-input description-input";
+          descriptionInput.rows = 2;
+          descriptionInput.value = item.description || "";
+          descriptionInput.placeholder = "What this sensor means";
+          descriptionInput.addEventListener("input", () => {
+            sensorMapRows[index].description = descriptionInput.value;
+            markSensorMapDirty();
+          });
+
+          const removeButton = document.createElement("button");
+          removeButton.className = "remove-row";
+          removeButton.type = "button";
+          removeButton.textContent = "Remove";
+          removeButton.addEventListener("click", () => {
+            sensorMapRows.splice(index, 1);
+            renderSensorRows();
+            saveSensorMap();
+          });
+
+          sensorCell.appendChild(sensorInput);
+          descriptionCell.appendChild(descriptionInput);
+          actionCell.appendChild(removeButton);
+          row.append(sensorCell, descriptionCell, actionCell);
+          sensorRows.appendChild(row);
+        });
+
+        syncPlotSensorOptions();
+      }
+
+      function markSensorMapDirty() {
+        setSaveStatus("Saving...", "saving");
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveSensorMap, 700);
+      }
+
+      async function saveSensorMap() {
+        clearTimeout(saveTimer);
+        setSaveStatus("Saving...", "saving");
+
+        try {
+          const response = await fetch("/api/sensor-map", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sensors: sensorMapRows }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Save failed.");
+          }
+          setSaveStatus("Saved", "saved");
+        } catch (error) {
+          setSaveStatus(`Error: ${error.message}`, "error");
+        }
+      }
+
+      async function loadSensorMap() {
+        if (sensorMapLoaded) return;
+        sensorMapLoaded = true;
+
+        try {
+          const response = await fetch("/api/sensor-map");
+          const data = await response.json();
+          sensorMapRows = data.sensors || [];
+          renderSensorRows();
+          setSaveStatus(sensorMapRows.length ? "Saved" : data.message || "No rows", "saved");
+        } catch (error) {
+          sensorRows.innerHTML = `<tr><td colspan="3">Error: ${error.message}</td></tr>`;
+          setSaveStatus("Load failed", "error");
+        }
+      }
+
+      async function plotSelectedSensor() {
+        const sensor = plotSensorSelect.value;
+        const days = plotDaysInput.value || "30";
+        if (!sensor) {
+          plotArea.textContent = "Add a sensor row before plotting.";
+          return;
+        }
+
+        plotButton.disabled = true;
+        plotArea.textContent = "Reading numeric sensor history...";
+
+        try {
+          const response = await fetch(`/api/sensor-plot?sensor=${encodeURIComponent(sensor)}&days=${encodeURIComponent(days)}`);
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || "Plot failed.");
+          }
+          plotArea.innerHTML = "";
+          plotArea.appendChild(buildPlotCard(data));
+        } catch (error) {
+          plotArea.textContent = `Error: ${error.message}`;
+        } finally {
+          plotButton.disabled = false;
+        }
+      }
+
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          tabs.forEach((item) => item.classList.remove("active"));
+          tab.classList.add("active");
+
+          const showSensorMaps = tab.dataset.tab === "sensorMaps";
+          const showSensorPlots = tab.dataset.tab === "sensorPlots";
+          promptsPanel.classList.toggle("active", !showSensorMaps && !showSensorPlots);
+          sensorMapsPanel.classList.toggle("active", showSensorMaps);
+          sensorPlotsPanel.classList.toggle("active", showSensorPlots);
+
+          if (showSensorMaps || showSensorPlots) {
+            loadSensorMap();
+          }
+        });
+      });
+
+      addSensorRowButton.addEventListener("click", () => {
+        sensorMapRows.push({ sensor: "", description: "" });
+        renderSensorRows();
+        setSaveStatus("Unsaved row", "saving");
+      });
+
+      saveSensorMapButton.addEventListener("click", saveSensorMap);
+      plotButton.addEventListener("click", plotSelectedSensor);
+      const savedProvider = localStorage.getItem(PROVIDER_STORAGE_KEY);
+      const savedModel = localStorage.getItem(MODEL_STORAGE_KEY);
+      if (PROVIDER_OPTIONS.some((provider) => provider.id === savedProvider)) {
+        providerSelect.value = savedProvider;
+      }
+      renderModelOptions(savedModel);
+      providerSelect.addEventListener("change", () => renderModelOptions());
+      modelSelect.addEventListener("change", updateModelPrice);
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const message = input.value.trim();
+        if (!message) return;
+
+        sendButton.disabled = true;
+        input.disabled = true;
+        input.value = "";
+
+        appendMessage({ role: "user", content: message }, { enter: true });
+        const provider = selectedProvider();
+        const model = selectedModel();
+        const loadingBubble = appendMessage(
+          {
+            role: "assistant",
+            content: "",
+            provider: provider.id,
+            provider_label: provider.label,
+            model: model.id,
+            model_label: model.label,
+            model_pricing: model,
+          },
+          { loading: true, enter: true }
+        );
+        startLoadingStages(loadingBubble, message);
+
+        try {
+          const response = await fetch("/api/message", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, provider: provider.id, model: model.id, chat_id: activeChatId }),
+          });
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || "Request failed.");
+          }
+
+          clearInterval(loadingStageTimer);
+          loadingBubble.classList.remove("loading");
+          updateChats(data.chats || chats, data.active_chat_id || activeChatId);
+          typeInto(loadingBubble, data.assistant || "", () => {
+            renderMessages(data.messages || []);
+          });
+        } catch (error) {
+          clearInterval(loadingStageTimer);
+          loadingBubble.classList.remove("loading");
+          loadingBubble.querySelector(".content").textContent = `Error: ${error.message}`;
+          messages[messages.length - 1] = {
+            role: "assistant",
+            content: `Error: ${error.message}`,
+            provider: provider.id,
+            provider_label: provider.label,
+            model: model.id,
+            model_label: model.label,
+            model_pricing: model,
+          };
+        } finally {
+          sendButton.disabled = false;
+          input.disabled = false;
+          input.focus();
+        }
+      });
+
+      newChatButton.addEventListener("click", createNewChat);
+
+      resetButton.addEventListener("click", async () => {
+        const response = await fetch("/api/reset", { method: "POST" });
+        const data = await response.json();
+        updateChats(data.chats || [], data.active_chat_id);
+        renderMessages(data.messages || []);
+        input.focus();
+      });
+
+      loadMessages();
+    </script>
+  </body>
+</html>
