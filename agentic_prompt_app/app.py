@@ -619,8 +619,25 @@ def home_assistant_api_url():
     return os.environ.get("HOME_ASSISTANT_API_URL", HOME_ASSISTANT_API_URL).rstrip("/")
 
 
+def env_value(name):
+    value = os.environ.get(name)
+    if value:
+        return value
+    for directory in ("/var/run/s6/container_environment", "/run/s6/container_environment"):
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    file_value = handle.read().strip()
+                if file_value:
+                    return file_value
+            except OSError:
+                continue
+    return None
+
+
 def home_assistant_token():
-    return os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HOME_ASSISTANT_TOKEN")
+    return env_value("SUPERVISOR_TOKEN") or env_value("HOME_ASSISTANT_TOKEN")
 
 
 def home_assistant_api_request(path, params=None, timeout=30):
