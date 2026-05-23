@@ -13,6 +13,7 @@ import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import matplotlib
 
@@ -26,6 +27,7 @@ from zoneinfo import ZoneInfo
 import yaml
 from flask import Flask, jsonify, render_template, request, session
 from openai import OpenAI
+from werkzeug.exceptions import HTTPException
 
 
 DEFAULT_PROVIDER = "openai"
@@ -248,13 +250,71 @@ ACTIVE_STATES = {"on", "open", "opened", "detected", "active", "home", "true"}
 MAX_CONTEXT_SENSORS = 6
 MAX_CONTEXT_SENSOR_ROWS = 2000
 
-app = Flask(__name__)
+BASE_DIR = Path(__file__).resolve().parent
+
+
+class IngressPrefixMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        prefix = (
+            environ.get("HTTP_X_INGRESS_PATH")
+            or environ.get("HTTP_X_FORWARDED_PREFIX")
+            or environ.get("HTTP_X_PROXY_PREFIX")
+        )
+        if prefix:
+            environ["SCRIPT_NAME"] = f"/{prefix.strip('/')}"
+        return self.app(environ, start_response)
+
+
+app = Flask(
+    __name__,
+    template_folder=str(BASE_DIR / "templates"),
+    static_folder=str(BASE_DIR / "static"),
+    static_url_path="/static",
+)
+app.wsgi_app = IngressPrefixMiddleware(app.wsgi_app)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 
 conversations = {}
 chat_store_loaded_path = None
 home_assistant_config_cache = {"expires": 0, "data": None}
 home_assistant_history_cache = {}
+
+
+@app.before_request
+def log_static_requests():
+    if request.path.startswith("/static/"):
+        app.logger.info(
+            "Static request path=%s script_root=%s ingress_path=%s forwarded_prefix=%s",
+            request.path,
+            request.script_root,
+            request.headers.get("X-Ingress-Path"),
+            request.headers.get("X-Forwarded-Prefix"),
+        )
+
+
+@app.after_request
+def force_api_json_headers(response):
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": exc.description, "status": exc.code}), exc.code
+    return exc
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(exc):
+    if request.path.startswith("/api/"):
+        app.logger.exception("Unhandled API error")
+        return jsonify({"error": "Internal server error.", "status": 500}), 500
+    raise exc
 
 SLEEP_METRIC_ENTITIES = {
     "minutes_asleep": "sensor.nick_r_sleep_minutes_asleep",

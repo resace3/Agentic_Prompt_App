@@ -91,6 +91,7 @@ class PromptAppTests(unittest.TestCase):
         html = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn('href="static/styles.css"', html)
         self.assertIn('id="providerSelect"', html)
         self.assertIn('id="modelSelect"', html)
         self.assertIn('id="modelPrice"', html)
@@ -102,6 +103,14 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn(app_module.DEFAULT_CLAUDE_MODEL, html)
         self.assertIn("promptFlowSelectedModel.v5", html)
         self.assertIn('className = "pinned-marker"', html)
+
+    def test_index_uses_ingress_prefix_for_static_assets(self):
+        response = self.client.get("/", headers={"X-Ingress-Path": "/api/hassio_ingress/test-token"})
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('href="/api/hassio_ingress/test-token/static/styles.css"', html)
+        self.assertIn('const REQUEST_SCRIPT_ROOT = "/api/hassio_ingress/test-token";', html)
 
     def test_message_uses_selected_model_and_stores_response_model_stamp(self):
         class FakeResponses:

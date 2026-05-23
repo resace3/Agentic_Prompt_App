@@ -4,7 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Prompt Flow</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    {% set styles_url = url_for('static', filename='styles.css') %}
+    <link rel="stylesheet" href="{{ styles_url if request.script_root else styles_url.lstrip('/') }}">
   </head>
   <body>
     <main class="app-shell">
@@ -151,6 +152,48 @@
       let typingTimer = null;
       let saveTimer = null;
       let loadingStageTimer = null;
+
+      const REQUEST_SCRIPT_ROOT = {{ request.script_root | tojson }};
+
+      function appUrl(path) {
+        if (/^https?:\/\//.test(path)) {
+          return path;
+        }
+        const cleanPath = path.replace(/^\/+/, "");
+        if (REQUEST_SCRIPT_ROOT) {
+          return `${REQUEST_SCRIPT_ROOT}/${cleanPath}`;
+        }
+        const basePath = window.location.pathname.endsWith("/")
+          ? window.location.pathname
+          : `${window.location.pathname}/`;
+        return new URL(cleanPath, `${window.location.origin}${basePath}`).toString();
+      }
+
+      async function fetchJson(path, options = {}) {
+        const url = appUrl(path);
+        const response = await fetch(url, options);
+        const contentType = response.headers.get("content-type") || "";
+        const rawText = await response.text();
+        console.log("Fetch response", {
+          path,
+          url,
+          status: response.status,
+          contentType,
+          rawText,
+        });
+
+        let data = {};
+        if (rawText.trim()) {
+          try {
+            data = JSON.parse(rawText);
+          } catch (error) {
+            throw new Error(
+              `Expected JSON from ${path}, got ${contentType || "unknown content type"}: ${rawText.slice(0, 240)}`
+            );
+          }
+        }
+        return { response, data };
+      }
 
       function scrollMessages() {
         messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
@@ -701,8 +744,7 @@
 
       async function selectChat(chatId) {
         if (!chatId || chatId === activeChatId) return;
-        const response = await fetch(`/api/messages?chat_id=${encodeURIComponent(chatId)}`);
-        const data = await response.json();
+        const { response, data } = await fetchJson(`/api/messages?chat_id=${encodeURIComponent(chatId)}`);
         if (!response.ok) {
           return;
         }
@@ -713,8 +755,7 @@
       }
 
       async function createNewChat() {
-        const response = await fetch("/api/chats", { method: "POST" });
-        const data = await response.json();
+        const { response, data } = await fetchJson("/api/chats", { method: "POST" });
         if (!response.ok) return;
         updateChats(data.chats || [], data.active_chat_id);
         renderMessages(data.messages || []);
@@ -722,20 +763,18 @@
       }
 
       async function togglePinChat(chatId, pinned) {
-        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+        const { response, data } = await fetchJson(`/api/chats/${encodeURIComponent(chatId)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ pinned }),
         });
-        const data = await response.json();
         if (!response.ok) return;
         updateChats(data.chats || chats, data.active_chat_id || activeChatId);
       }
 
       async function deleteChat(chatId) {
         if (!window.confirm("Delete this chat?")) return;
-        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
-        const data = await response.json();
+        const { response, data } = await fetchJson(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
         if (!response.ok) return;
         updateChats(data.chats || [], data.active_chat_id);
         renderMessages(data.messages || []);
@@ -798,8 +837,7 @@
       }
 
       async function loadMessages() {
-        const response = await fetch("/api/messages");
-        const data = await response.json();
+        const { data } = await fetchJson("/api/messages");
         updateChats(data.chats || [], data.active_chat_id);
         renderMessages(data.messages || []);
       }
@@ -894,12 +932,11 @@
         setSaveStatus("Saving...", "saving");
 
         try {
-          const response = await fetch("/api/sensor-map", {
+          const { response, data } = await fetchJson("/api/sensor-map", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sensors: sensorMapRows }),
           });
-          const data = await response.json();
           if (!response.ok) {
             throw new Error(data.error || "Save failed.");
           }
@@ -914,8 +951,7 @@
         sensorMapLoaded = true;
 
         try {
-          const response = await fetch("/api/sensor-map");
-          const data = await response.json();
+          const { data } = await fetchJson("/api/sensor-map");
           sensorMapRows = data.sensors || [];
           renderSensorRows();
           setSaveStatus(sensorMapRows.length ? "Saved" : data.message || "No rows", "saved");
@@ -937,8 +973,7 @@
         plotArea.textContent = "Reading numeric sensor history...";
 
         try {
-          const response = await fetch(`/api/sensor-plot?sensor=${encodeURIComponent(sensor)}&days=${encodeURIComponent(days)}`);
-          const data = await response.json();
+          const { response, data } = await fetchJson(`/api/sensor-plot?sensor=${encodeURIComponent(sensor)}&days=${encodeURIComponent(days)}`);
           if (!response.ok) {
             throw new Error(data.error || "Plot failed.");
           }
@@ -1012,12 +1047,11 @@
         startLoadingStages(loadingBubble, message);
 
         try {
-          const response = await fetch("/api/message", {
+          const { response, data } = await fetchJson("/api/message", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ message, provider: provider.id, model: model.id, chat_id: activeChatId }),
           });
-          const data = await response.json();
 
           if (!response.ok) {
             throw new Error(data.error || "Request failed.");
@@ -1052,8 +1086,7 @@
       newChatButton.addEventListener("click", createNewChat);
 
       resetButton.addEventListener("click", async () => {
-        const response = await fetch("/api/reset", { method: "POST" });
-        const data = await response.json();
+        const { data } = await fetchJson("/api/reset", { method: "POST" });
         updateChats(data.chats || [], data.active_chat_id);
         renderMessages(data.messages || []);
         input.focus();
