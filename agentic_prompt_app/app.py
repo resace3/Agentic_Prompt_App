@@ -208,6 +208,12 @@ SLEEP_ENTITY_EXCLUDE_TERMS = (
     "remote.",
     "remote_",
 )
+SENSOR_MAP_DISCOVERY_EXCLUDED_DOMAINS = {
+    "automation",
+    "button",
+    "scene",
+    "script",
+}
 HA_REQUEST_TERMS = (
     "home assistant",
     "home-assistant",
@@ -960,6 +966,9 @@ def discover_sleep_entities():
 
     def score(entity_id):
         lowered = entity_id.lower()
+        domain = lowered.split(".", 1)[0]
+        if domain in SENSOR_MAP_DISCOVERY_EXCLUDED_DOMAINS:
+            return -1
         if any(term in lowered for term in SLEEP_ENTITY_EXCLUDE_TERMS):
             return -1
         points = 0

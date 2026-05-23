@@ -72,6 +72,60 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(loaded_rows[0]["sensor"], "sensor.test_0")
         self.assertEqual(loaded_rows[-1]["sensor"], "sensor.test_19")
 
+    def test_sensor_map_removals_survive_restart_with_discovery_available(self):
+        original_home_assistant_available = app_module.home_assistant_available
+        original_discover_sleep_entities = app_module.discover_sleep_entities
+        app_module.home_assistant_available = lambda: True
+        app_module.discover_sleep_entities = lambda: [
+            "scene.awake_light",
+            "scene.pre_awake_light",
+            "sensor.nick_r_sleep_minutes_asleep",
+        ]
+        try:
+            save_response = self.client.put(
+                "/api/sensor-map",
+                json={
+                    "sensors": [
+                        {
+                            "sensor": "sensor.nick_r_sleep_minutes_asleep",
+                            "description": "Total minutes asleep.",
+                        }
+                    ]
+                },
+            )
+            self.assertEqual(save_response.status_code, 200)
+
+            restarted_client = app_module.app.test_client()
+            load_response = restarted_client.get("/api/sensor-map")
+            loaded_rows = load_response.get_json()["sensors"]
+        finally:
+            app_module.home_assistant_available = original_home_assistant_available
+            app_module.discover_sleep_entities = original_discover_sleep_entities
+
+        loaded_sensors = [row["sensor"] for row in loaded_rows]
+        self.assertEqual(loaded_sensors, ["sensor.nick_r_sleep_minutes_asleep"])
+        self.assertNotIn("scene.awake_light", loaded_sensors)
+        self.assertNotIn("scene.pre_awake_light", loaded_sensors)
+
+    def test_sleep_entity_discovery_excludes_scenes_from_sensor_map(self):
+        original_request = app_module.home_assistant_api_request
+        app_module.home_assistant_api_request = lambda path, timeout=30, params=None: [
+            {"entity_id": "scene.awake_light", "attributes": {"friendly_name": "Awake Light"}},
+            {"entity_id": "scene.pre_awake_light", "attributes": {"friendly_name": "Pre Awake Light"}},
+            {
+                "entity_id": "sensor.nick_r_sleep_minutes_asleep",
+                "attributes": {"friendly_name": "Nick R Sleep Minutes Asleep"},
+            },
+        ]
+        try:
+            discovered = app_module.discover_sleep_entities()
+        finally:
+            app_module.home_assistant_api_request = original_request
+
+        self.assertEqual(discovered, ["sensor.nick_r_sleep_minutes_asleep"])
+        self.assertNotIn("scene.awake_light", discovered)
+        self.assertNotIn("scene.pre_awake_light", discovered)
+
     def test_home_assistant_api_uses_supervisor_token(self):
         original_token = os.environ.get("SUPERVISOR_TOKEN")
         original_home_assistant_token = os.environ.get("HOME_ASSISTANT_TOKEN")
