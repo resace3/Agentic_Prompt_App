@@ -339,3 +339,134 @@ def test_n_of_1_visual_response_stays_inside_assistant_card(page):
     assert "latex-frac" in result["latexHtml"]
     assert result["inlineMathCount"] >= 1
     assert result["artifactTitles"] == ["Association Plot", "Same-Day DAG", "Pearson correlation"]
+
+
+def test_heavy_analysis_response_has_no_page_or_card_overflow(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+    markdown = """
+### Descriptive, Predictive, and Causal Output
+
+- Descriptive: sleep minutes and steps are summarized as observed values.
+- Predictive: regression is framed as prediction, not proof of cause.
+- Causal: DAG edges are assumptions for N-of-1 screening, not proven effects.
+
+| Analysis | Variables | Interpretation |
+|---|---|---|
+| Time-series | sleep minutes, steps | trends over time |
+| Histogram | sleep efficiency | distribution only |
+| Correlation | sleep, steps, awakenings, minutes awake, time in bed, efficiency | association, not causation |
+
+```python
+very_long_variable_name = "this line is intentionally long to verify that code scrolls inside the response card instead of expanding the Home Assistant ingress page width"
+```
+
+Inline math: \\(r = \\frac{\\sum_i (X_i-\\bar{X})(Y_i-\\bar{Y})}{\\sqrt{\\sum_i (X_i-\\bar{X})^2}}\\).
+
+$$Y_t = \\alpha + \\beta X_{t-1} + \\epsilon_t$$
+""".strip()
+
+    viewports = (
+        {"width": 1280, "height": 720},
+        {"width": 1440, "height": 900},
+        {"width": 1920, "height": 1080},
+        {"width": 430, "height": 740},
+    )
+
+    for size in viewports:
+        page.set_viewport_size(size)
+        page.goto(base_url, wait_until="networkidle")
+        result = page.evaluate(
+            """
+            (markdown) => {
+              const wideSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="2600" height="900" viewBox="0 0 2600 900"><rect width="2600" height="900" fill="white"/><text x="80" y="150" font-size="72">Responsive plot or DAG content</text><rect x="80" y="220" width="520" height="190" rx="24" fill="#eff6ff" stroke="#2563eb" stroke-width="8"/><text x="340" y="330" text-anchor="middle" font-size="42">Steps</text><rect x="1960" y="220" width="520" height="190" rx="24" fill="#ecfdf5" stroke="#059669" stroke-width="8"/><text x="2220" y="330" text-anchor="middle" font-size="42">Sleep</text><path d="M 600 315 C 1050 315 1510 315 1960 315" fill="none" stroke="#334155" stroke-width="10"/></svg>');
+              const message = {
+                role: 'assistant',
+                content: markdown,
+                provider_label: 'OpenAI',
+                model_label: 'GPT-4.1 Nano',
+                model: 'gpt-4.1-nano',
+                analysis_visuals: {
+                  title: 'Generated visuals',
+                  artifacts: [
+                    {type: 'plot', title: 'Sleep Time-Series Plot', description: 'Line plot caption', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                    {type: 'plot', title: 'Sleep Histogram', description: 'Histogram caption', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                    {type: 'plot', title: 'Steps vs Sleep Scatterplot', description: 'Scatterplot caption', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                    {type: 'plot', title: 'Correlation Heatmap', description: 'Heatmap caption', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                    {type: 'dag', title: 'Causal DAG', description: 'Assumptions, not proof', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                    {type: 'latex', title: 'N-of-1 Equation', description: 'Equation caption', latex: 'r = \\\\frac{\\\\sum_i (X_i-\\\\bar{X})(Y_i-\\\\bar{Y})}{\\\\sqrt{\\\\sum_i (X_i-\\\\bar{X})^2}}'}
+                  ]
+                }
+              };
+              const messages = document.querySelector('#messages');
+              messages.innerHTML = '';
+              messages.appendChild(messageElement(message));
+
+              const rectFor = (selector) => {
+                const node = document.querySelector(selector);
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return {
+                  left: rect.left,
+                  right: rect.right,
+                  top: rect.top,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                  overflowX: style.overflowX,
+                  overflowY: style.overflowY,
+                  maxWidth: style.maxWidth,
+                  position: style.position,
+                };
+              };
+              const bubble = rectFor('.message.assistant');
+              const app = rectFor('.app-shell');
+              const messagesRect = rectFor('#messages');
+              const input = rectFor('#messageInput');
+              const send = rectFor('#sendButton');
+              const wrappers = Array.from(document.querySelectorAll('.markdown-table-wrap, .code-block pre, .latex-equation, .analysis-artifact, .plot-card')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return {className: node.className, left: rect.left, right: rect.right, width: rect.width, overflowX: style.overflowX, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth};
+              });
+              const media = Array.from(document.querySelectorAll('.analysis-plot-image, .dag-image, .python-plot-image, .content img, .content svg, .content canvas')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const parentRect = node.parentElement.getBoundingClientRect();
+                return {className: node.className, left: rect.left, right: rect.right, width: rect.width, parentLeft: parentRect.left, parentRight: parentRect.right};
+              });
+              const tabs = Array.from(document.querySelectorAll('.main-pane > .tabs > .tab')).map((node) => node.getBoundingClientRect().height);
+              return {
+                viewport: {width: innerWidth, height: innerHeight},
+                pageScrollWidth: document.documentElement.scrollWidth,
+                pageClientWidth: document.documentElement.clientWidth,
+                bodyScrollWidth: document.body.scrollWidth,
+                bodyClientWidth: document.body.clientWidth,
+                app,
+                messagesRect,
+                bubble,
+                input,
+                send,
+                wrappers,
+                media,
+                tabs,
+              };
+            }
+            """,
+            markdown,
+        )
+        print("heavy analysis overflow snapshot", size, result)
+
+        assert result["pageScrollWidth"] <= result["pageClientWidth"] + 1, result
+        assert result["bodyScrollWidth"] <= result["bodyClientWidth"] + 1, result
+        assert result["app"]["top"] >= -1 and result["app"]["bottom"] <= result["viewport"]["height"] + 1, result
+        assert result["input"]["bottom"] <= result["viewport"]["height"] + 1, result
+        assert result["send"]["bottom"] <= result["viewport"]["height"] + 1, result
+        assert result["bubble"]["right"] <= result["messagesRect"]["right"] + 1, result
+        assert all(wrapper["right"] <= result["bubble"]["right"] + 1 for wrapper in result["wrappers"]), result
+        assert all(item["right"] <= item["parentRight"] + 1 for item in result["media"]), result
+        assert all(height <= 45 for height in result["tabs"]), result
+
+        page.locator(".tab[data-tab='sensorMaps']").click()
+        sensor_height = page.locator(".app-shell").bounding_box()["height"]
+        page.locator(".tab[data-tab='prompts']").click()
+        prompts_height = page.locator(".app-shell").bounding_box()["height"]
+        assert abs(sensor_height - prompts_height) <= 1

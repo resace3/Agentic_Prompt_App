@@ -307,6 +307,7 @@ PLOT_REQUEST_TERMS = (
     "plot",
     "graph",
     "chart",
+    "heatmap",
     "histogram",
     "scatter",
     "box plot",
@@ -315,6 +316,7 @@ PLOT_REQUEST_TERMS = (
     "visualise",
 )
 PLOT_TYPE_ALIASES = {
+    "heatmap": ("heatmap", "correlation matrix"),
     "histogram": ("histogram", "distribution"),
     "scatter": ("scatter", " vs ", "versus", "relationship between", "correlation"),
     "box": ("box plot", "boxplot"),
@@ -541,11 +543,10 @@ SLEEP_PLOT_METRIC_UNITS = {
 
 
 def secret_candidate_paths():
-    return [
-        os.environ.get("SECRETS_YAML"),
-        "/config/secrets.yaml",
-        os.path.join(os.getcwd(), "secrets.yaml"),
-    ]
+    override = os.environ.get("SECRETS_YAML")
+    if override is not None:
+        return [override]
+    return ["/config/secrets.yaml", os.path.join(os.getcwd(), "secrets.yaml")]
 
 
 def configured_secret_source(secret_name, env_names):
@@ -1095,6 +1096,13 @@ def detect_plot_type(user_text):
         if any(alias in lowered for alias in aliases):
             return plot_type
     return "line"
+
+
+def detect_plot_aggregation(user_text):
+    lowered = user_text.lower()
+    if any(term in lowered for term in ("day of week", "weekday", "week day", "by day")):
+        return "day_of_week"
+    return "daily"
 
 
 def should_show_sensor_data(user_text):
@@ -2069,6 +2077,53 @@ def point_datetime(point):
     return datetime.fromtimestamp(float(point["timestamp"]), timezone.utc)
 
 
+WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def aggregate_plot_by_day_of_week(plot):
+    if not plot or not plot.get("available") or not plot.get("points"):
+        return plot
+
+    grouped = {index: [] for index in range(7)}
+    for point in plot["points"]:
+        weekday = point_datetime(point).weekday()
+        grouped[weekday].append(float(point["value"]))
+
+    points = []
+    for weekday, values in grouped.items():
+        if not values:
+            continue
+        points.append(
+            {
+                "time": WEEKDAY_LABELS[weekday],
+                "category": WEEKDAY_LABELS[weekday],
+                "value": round(mean(values), 2),
+                "samples": len(values),
+            }
+        )
+
+    if not points:
+        return {**plot, "available": False, "message": "No weekday groups were available for this plot.", "points": []}
+
+    values = [point["value"] for point in points]
+    spec = dict(plot.get("plot_spec") or {})
+    spec["aggregation"] = "day_of_week"
+    spec["x"] = "weekday"
+    spec["x_label"] = "Day of Week"
+    spec["title"] = f"{plot.get('label') or plot.get('sensor') or 'Sensor'} by Day of Week"
+    return {
+        **plot,
+        "plot_spec": spec,
+        "plot_type": "bar",
+        "points": points,
+        "samples": len(points),
+        "min": round(min(values), 2),
+        "max": round(max(values), 2),
+        "average": round(mean(values), 2),
+        "latest": round(values[-1], 2),
+    }
+
+
 def style_plot_axes(ax, title, x_label, y_label, *, show_grid=True):
     ax.set_title(title, loc="left", fontsize=15, fontweight="bold", color="#111827", pad=16)
     ax.set_xlabel(x_label, fontsize=11, fontweight="bold", color="#334155", labelpad=10)
@@ -2202,7 +2257,49 @@ def render_multi_series_python_plot(plot):
     }
 
 
+def render_correlation_heatmap_plot(plot):
+    matrix = plot.get("correlation_matrix") or {}
+    labels = matrix.get("labels") or []
+    values = matrix.get("values") or []
+    if not labels or not values:
+        return None
+
+    title = (plot.get("plot_spec") or {}).get("title") or plot.get("title") or "Correlation Heatmap"
+    fig, ax = plt.subplots(figsize=(9.6, 7.2), dpi=145)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+    image = ax.imshow(values, vmin=-1, vmax=1, cmap="coolwarm")
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8.5)
+    ax.set_yticklabels(labels, fontsize=8.5)
+    ax.set_title(title, loc="left", fontsize=15, fontweight="bold", color="#111827", pad=16)
+    for row_index, row in enumerate(values):
+        for column_index, value in enumerate(row):
+            color = "#ffffff" if abs(float(value)) > 0.55 else "#111827"
+            ax.text(column_index, row_index, f"{float(value):.2f}", ha="center", va="center", color=color, fontsize=8)
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.set_label("Pearson r", fontsize=10, fontweight="bold", color="#334155")
+    ax.tick_params(axis="both", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    footer = plot.get("message") or "Correlations are descriptive associations, not causal effects."
+    ax.text(0, -0.22, footer, transform=ax.transAxes, fontsize=8.5, color="#64748b", va="top")
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
+    return {
+        "data_url": encoded_matplotlib_figure(fig),
+        "format": "png",
+        "renderer": "matplotlib",
+        "plot_type": "heatmap",
+        "x_axis_label": "Variables",
+        "y_axis_label": "Variables",
+        "title": title,
+    }
+
+
 def render_python_plot(plot):
+    if plot and (plot.get("plot_type") == "heatmap" or (plot.get("plot_spec") or {}).get("plot_type") == "heatmap"):
+        return render_correlation_heatmap_plot(plot)
     if plot and plot.get("series"):
         return render_multi_series_python_plot(plot)
     if not plot or not plot.get("available") or not plot.get("points"):
@@ -2211,7 +2308,7 @@ def render_python_plot(plot):
     points = plot["points"]
     spec = plot.get("plot_spec") or {}
     plot_type = spec.get("plot_type") or plot.get("plot_type") or "line"
-    x_values = [point_datetime(point) for point in points]
+    aggregation = spec.get("aggregation") or "daily"
     y_values = [float(point["value"]) for point in points]
     y_label = spec.get("y_label") or plot_axis_label(plot)
     x_label = spec.get("x_label") or "Date"
@@ -2223,12 +2320,18 @@ def render_python_plot(plot):
     if plot_type == "histogram":
         bins = min(12, max(5, int(len(y_values) ** 0.5) + 1))
         ax.hist(y_values, bins=bins, color="#2563eb", edgecolor="#1e3a8a", alpha=0.82)
-        x_label = y_label
-        y_label = "Number of Nights"
+        x_label = spec.get("x_label") or plot_axis_label(plot)
+        y_label = spec.get("y_label") or "Count"
     elif plot_type == "bar":
-        ax.bar(x_values, y_values, width=0.72, color="#2563eb", alpha=0.86)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
-        fig.autofmt_xdate(rotation=28, ha="right")
+        if aggregation == "day_of_week":
+            x_labels = [point.get("category") or point.get("time") for point in points]
+            ax.bar(x_labels, y_values, color="#2563eb", alpha=0.86)
+            ax.tick_params(axis="x", rotation=0)
+        else:
+            x_values = [point_datetime(point) for point in points]
+            ax.bar(x_values, y_values, width=0.72, color="#2563eb", alpha=0.86)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
+            fig.autofmt_xdate(rotation=28, ha="right")
     elif plot_type == "box":
         ax.boxplot(
             y_values,
@@ -2240,11 +2343,13 @@ def render_python_plot(plot):
         )
         x_label = ""
     elif plot_type == "area":
+        x_values = [point_datetime(point) for point in points]
         ax.plot(x_values, y_values, color="#2563eb", linewidth=2.6)
         ax.fill_between(x_values, y_values, min(y_values), color="#93c5fd", alpha=0.35)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
         fig.autofmt_xdate(rotation=28, ha="right")
     else:
+        x_values = [point_datetime(point) for point in points]
         ax.plot(x_values, y_values, color="#2563eb", linewidth=2.6, marker="o", markersize=5.2)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
         fig.autofmt_xdate(rotation=28, ha="right")
@@ -2620,12 +2725,14 @@ def query_cleaned_sleep_points(entity_id, days=30, plot_type="line"):
     label = SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title())
     unit = SLEEP_PLOT_METRIC_UNITS.get(metric, "value")
     y_label = f"{label} ({unit})"
+    spec_x_label = y_label if plot_type == "histogram" else "Date"
+    spec_y_label = "Number of Nights" if plot_type == "histogram" else y_label
     plot_spec = build_plot_spec(
         plot_type=plot_type,
         entity_ids=[entity_id],
         title=plot_title_for_metric(metric, days, plot_type),
-        x_label="Date",
-        y_label=y_label,
+        x_label=spec_x_label,
+        y_label=spec_y_label,
         days=summary["days_requested"],
     )
     return {
@@ -2660,15 +2767,15 @@ def requested_sleep_plot_metrics(user_text):
         metrics.append("awakenings")
     if "time in bed" in lowered:
         metrics.append("time_in_bed")
-    if any(term in lowered for term in ("sleep time", "sleep duration", "minutes asleep", "time asleep", "asleep")):
-        if "time_in_bed" not in metrics:
-            metrics.append("minutes_asleep")
-    elif "sleep" in lowered and "time_in_bed" not in metrics:
-        metrics.append("minutes_asleep")
     if "efficiency" in lowered:
         metrics.append("efficiency")
     if "minutes awake" in lowered or "awake time" in lowered:
         metrics.append("minutes_awake")
+    if any(term in lowered for term in ("sleep time", "sleep duration", "minutes asleep", "time asleep", "asleep")):
+        if "time_in_bed" not in metrics:
+            metrics.append("minutes_asleep")
+    elif "sleep" in lowered and not metrics:
+        metrics.append("minutes_asleep")
 
     deduped = []
     for metric in metrics:
@@ -2774,6 +2881,121 @@ def build_multi_sleep_plot(metrics, days, plot_type="line"):
     }
 
 
+def sleep_correlation_variables(days):
+    summary = summarize_completed_sleep(days=days)
+    if not summary.get("available"):
+        return None, summary
+
+    by_date = defaultdict(dict)
+    sleep_metrics = (
+        ("Sleep Minutes", "minutes_asleep"),
+        ("Awakenings", "awakenings"),
+        ("Minutes Awake", "minutes_awake"),
+        ("Time in Bed", "time_in_bed"),
+        ("Sleep Efficiency", "efficiency"),
+    )
+    for record in summary.get("daily", []):
+        date = record.get("date")
+        for label, metric in sleep_metrics:
+            value = record.get(metric)
+            if value is not None:
+                by_date[date][label] = float(value)
+
+    for row in load_sensor_map()["sensors"]:
+        sensor = row.get("sensor") or ""
+        if "step" not in sensor.lower():
+            continue
+        feature = sensor_daily_feature(row, days=days)
+        if not feature.get("available"):
+            continue
+        for date, value in feature.get("daily", {}).items():
+            by_date[date]["Steps"] = float(value)
+        break
+
+    return by_date, summary
+
+
+def build_sleep_correlation_heatmap(days):
+    by_date, summary = sleep_correlation_variables(days)
+    if not by_date:
+        return {
+            "available": False,
+            "plot_type": "heatmap",
+            "message": (summary or {}).get("message", "No completed sleep records were available."),
+            "points": [],
+        }
+
+    desired_labels = ["Sleep Minutes", "Steps", "Awakenings", "Minutes Awake", "Time in Bed", "Sleep Efficiency"]
+    labels = [label for label in desired_labels if sum(label in values for values in by_date.values()) >= 3]
+    if len(labels) < 2:
+        return {
+            "available": False,
+            "plot_type": "heatmap",
+            "message": "At least two variables with three overlapping days are required for a correlation heatmap.",
+            "points": [],
+        }
+
+    matrix = []
+    n_by_pair = {}
+    for row_label in labels:
+        matrix_row = []
+        for column_label in labels:
+            pairs = [
+                (values.get(column_label), values.get(row_label))
+                for values in by_date.values()
+                if values.get(column_label) is not None and values.get(row_label) is not None
+            ]
+            n_by_pair[f"{row_label}__{column_label}"] = len(pairs)
+            if row_label == column_label:
+                matrix_row.append(1.0)
+            else:
+                correlation = pearson_correlation([pair[0] for pair in pairs], [pair[1] for pair in pairs])
+                matrix_row.append(round(correlation, 3) if correlation is not None else 0.0)
+        matrix.append(matrix_row)
+
+    days_requested = summary.get("days_requested", days)
+    step_sensors = [
+        row.get("sensor")
+        for row in load_sensor_map()["sensors"]
+        if row.get("sensor") and "step" in row.get("sensor", "").lower()
+    ]
+    plot_spec = build_plot_spec(
+        plot_type="heatmap",
+        entity_ids=list(SLEEP_METRIC_ENTITIES.values()) + step_sensors[:1],
+        title="Correlation Heatmap for Sleep and Activity Variables",
+        x_label="Variables",
+        y_label="Variables",
+        days=days_requested,
+        aggregation="daily_correlation",
+        x="variable",
+        y="variable",
+    )
+    return {
+        "available": True,
+        "sensor": "sleep_correlation_heatmap",
+        "title": plot_spec["title"],
+        "plot_type": "heatmap",
+        "plot_spec": plot_spec,
+        "days": days_requested,
+        "points": [],
+        "samples": len(by_date),
+        "cleaned": True,
+        "source": "completed_sleep_and_sensor_map",
+        "metric": "correlation_heatmap",
+        "date_range": summary.get("date_range"),
+        "correlation_matrix": {
+            "labels": labels,
+            "values": matrix,
+            "n_by_pair": n_by_pair,
+        },
+        "message": "Pearson correlations are descriptive associations, not causal effects.",
+        "query": {
+            "sleep_source": summary.get("query"),
+            "sensor_map_path": sensor_map_path(),
+        },
+    }
+
+
 def query_sensor_points(entity_id, days=30, limit=500, plot_type="line"):
     if not home_assistant_token() and not recorder_db_path():
         raise RuntimeError("SUPERVISOR_TOKEN is not available.")
@@ -2810,12 +3032,14 @@ def query_sensor_points(entity_id, days=30, limit=500, plot_type="line"):
 
     values = [point["value"] for point in points]
     y_label = "Value"
+    spec_x_label = y_label if plot_type == "histogram" else "Date"
+    spec_y_label = "Count" if plot_type == "histogram" else y_label
     plot_spec = build_plot_spec(
         plot_type=plot_type,
         entity_ids=[entity_id],
         title=f"{entity_id} Over {plot_time_window_label(days).replace('_', ' ').title()}",
-        x_label="Date",
-        y_label=y_label,
+        x_label=spec_x_label,
+        y_label=spec_y_label,
         days=days,
         aggregation="raw_history",
     )
@@ -2838,7 +3062,7 @@ def query_sensor_points(entity_id, days=30, limit=500, plot_type="line"):
 
 
 def query_sensor_history(entity_id, days=7, limit=80):
-    if not home_assistant_token():
+    if not home_assistant_token() and not recorder_db_path():
         raise RuntimeError("SUPERVISOR_TOKEN is not available.")
 
     days = max(1, min(int(days), 365))
@@ -3424,15 +3648,25 @@ def build_plot_for_prompt(user_text):
 
     days = requested_days_from_text(user_text)
     plot_type = detect_plot_type(user_text)
+    aggregation = detect_plot_aggregation(user_text)
+    if plot_type == "heatmap":
+        return attach_python_plot(build_sleep_correlation_heatmap(days=days))
+
     sleep_metrics = requested_sleep_plot_metrics(user_text)
     if plot_type == "scatter" and len(sleep_metrics) < 2:
         if "awakening" in user_text.lower() or "awakenings" in user_text.lower():
             sleep_metrics = ["awakenings", "minutes_asleep"]
     if len(sleep_metrics) > 1:
-        return attach_python_plot(build_multi_sleep_plot(sleep_metrics, days=days, plot_type=plot_type))
+        plot = build_multi_sleep_plot(sleep_metrics, days=days, plot_type=plot_type)
+        if aggregation == "day_of_week" and plot_type == "bar":
+            plot = aggregate_plot_by_day_of_week(plot)
+        return attach_python_plot(plot)
     if len(sleep_metrics) == 1:
         sensor = SLEEP_METRIC_ENTITIES[sleep_metrics[0]]
-        return attach_python_plot(query_sensor_points(sensor, days=days, plot_type=plot_type))
+        plot = query_sensor_points(sensor, days=days, plot_type=plot_type)
+        if aggregation == "day_of_week" and plot_type == "bar":
+            plot = aggregate_plot_by_day_of_week(plot)
+        return attach_python_plot(plot)
 
     if plot_type in {"bar", "histogram", "box"} and not prompt_mentions_entity_id(user_text):
         sensor = SLEEP_METRIC_ENTITIES["minutes_asleep"]
@@ -3445,7 +3679,10 @@ def build_plot_for_prompt(user_text):
             "points": [],
         }
 
-    return attach_python_plot(query_sensor_points(sensor, days=days, plot_type=plot_type))
+    plot = query_sensor_points(sensor, days=days, plot_type=plot_type)
+    if aggregation == "day_of_week" and plot_type == "bar":
+        plot = aggregate_plot_by_day_of_week(plot)
+    return attach_python_plot(plot)
 
 
 def build_sensor_data_for_prompt(user_text):

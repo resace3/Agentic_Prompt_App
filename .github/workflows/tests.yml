@@ -45,6 +45,19 @@ jobs:
           ruff format --diff . || true
           ruff format --check .
 
+      - name: Static Asset Syntax Checks
+        run: |
+          node --check static/app.js
+          python - <<'PY'
+          from pathlib import Path
+
+          css = Path("static/styles.css").read_text(encoding="utf-8")
+          assert css.count("{") == css.count("}"), "CSS braces are unbalanced"
+          assert "--prompt-flow-css-loaded" in css
+          assert ".content img" in css
+          assert ".latex-equation" in css
+          PY
+
       - name: Start Flask app and check health
         run: |
           set -euo pipefail
@@ -148,7 +161,15 @@ jobs:
             exit 1
           fi
 
-          pytest tests/test_browser_ui.py -q
+          pytest tests/test_browser_ui.py -q --screenshot=only-on-failure --output="${RUNNER_TEMP}/playwright-artifacts"
+
+      - name: Upload Browser UI Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-ui-artifacts
+          path: ${{ runner.temp }}/playwright-artifacts
+          if-no-files-found: ignore
 
   addon-install:
     runs-on: ubuntu-latest

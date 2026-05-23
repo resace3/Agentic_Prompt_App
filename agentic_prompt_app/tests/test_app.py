@@ -449,6 +449,114 @@ class PromptAppTests(unittest.TestCase):
         self.assertTrue(plot_artifact["data_url"].startswith("data:image/png;base64,"))
         self.assertTrue(dag_artifact["data_url"].startswith("data:image/svg+xml;base64,"))
         self.assertIn("\\frac", latex_artifact["latex"])
+        decoded_dag = base64.b64decode(dag_artifact["data_url"].split(",", 1)[1]).decode("utf-8")
+        self.assertIn("Minutes Asleep", decoded_dag)
+        self.assertIn("Steps", decoded_dag)
+        self.assertIn("Causal assumptions diagram, not proof", dag_artifact["description"])
+        self.assertIn("observational", analysis["method"].lower())
+        self.assertIn("not a full", analysis["method"].lower())
+
+    def test_deterministic_plot_specs_cover_analysis_plot_types(self):
+        sleep_values = [360, 390, 420, 450, 480, 510, 405, 435, 465, 495, 525, 555, 445, 475]
+        steps_values = [3200, 4100, 5200, 6100, 7400, 8200, 4600, 5400, 6900, 7600, 8800, 9300, 5900, 6700]
+        self.write_fake_recorder_db(
+            {
+                "sensor.nick_r_sleep_minutes_asleep": sleep_values,
+                "sensor.nick_r_sleep_time_in_bed": [value + 45 for value in sleep_values],
+                "sensor.nick_r_sleep_minutes_awake": [45, 42, 40, 38, 36, 35, 44, 41, 39, 37, 35, 33, 42, 40],
+                "sensor.nick_r_sleep_efficiency": [88, 90, 91, 92, 93, 94, 89, 90, 92, 93, 94, 95, 90, 91],
+                "sensor.nick_r_awakenings_count": [5, 4, 4, 3, 3, 2, 5, 4, 3, 3, 2, 2, 4, 3],
+                "sensor.nick_r_sleep_start_time": ["23:00"] * len(sleep_values),
+                "sensor.nick_r_steps": steps_values,
+                "binary_sensor.pantry_door_window": ["off", "on", "off", "off", "on", "off", "off"] * 2,
+                "sensor.nutribullet_plug_current": [0, 0, 1.2, 0, 1.5, 0, 0.8] * 2,
+            }
+        )
+        self.client.put(
+            "/api/sensor-map",
+            json={
+                "sensors": [
+                    {"sensor": "sensor.nick_r_steps", "description": "Daily step count"},
+                    {"sensor": "binary_sensor.pantry_door_window", "description": "Pantry door"},
+                    {"sensor": "sensor.nutribullet_plug_current", "description": "Smoothie use current"},
+                ]
+            },
+        )
+
+        cases = [
+            (
+                "show a plot of my sleep in the past week",
+                "line",
+                "sensor.nick_r_sleep_minutes_asleep",
+                "Date",
+                "Sleep Time (minutes)",
+            ),
+            ("plot my steps over time", "line", "sensor.nick_r_steps", "Date", "Value"),
+            (
+                "show a histogram of my sleep time in bed",
+                "histogram",
+                "sensor.nick_r_sleep_time_in_bed",
+                "Time In Bed (minutes)",
+                "Number of Nights",
+            ),
+            (
+                "show a histogram of my sleep efficiency",
+                "histogram",
+                "sensor.nick_r_sleep_efficiency",
+                "Sleep Efficiency (percent)",
+                "Number of Nights",
+            ),
+            (
+                "make a scatter plot of awakenings vs sleep time",
+                "scatter",
+                "sleep_metrics",
+                "Sleep Time (minutes)",
+                "Awakenings (count)",
+            ),
+            (
+                "make a bar chart by day of week for sleep",
+                "bar",
+                "sensor.nick_r_sleep_minutes_asleep",
+                "Day of Week",
+                "Sleep Time (minutes)",
+            ),
+        ]
+
+        for prompt, expected_type, expected_sensor, expected_x_label, expected_y_label in cases:
+            with self.subTest(prompt=prompt):
+                plot = app_module.build_plot_for_prompt(prompt)
+                self.assertTrue(plot["available"], plot)
+                self.assertEqual(plot["plot_type"], expected_type)
+                self.assertEqual(plot["sensor"], expected_sensor)
+                self.assertEqual(plot["plot_spec"]["plot_type"], expected_type)
+                self.assertEqual(plot["plot_spec"]["x_label"], expected_x_label)
+                self.assertEqual(plot["plot_spec"]["y_label"], expected_y_label)
+                self.assertGreater(plot["samples"], 0)
+                self.assertIn("query", plot)
+                self.assertEqual(plot["python_image"]["renderer"], "matplotlib")
+                self.assertEqual(plot["python_image"]["plot_type"], expected_type)
+                self.assertTrue(plot["python_image"]["data_url"].startswith("data:image/png;base64,"))
+                if expected_sensor == "sensor.nick_r_sleep_minutes_asleep" and "day of week" not in prompt:
+                    plotted_values = [point["value"] for point in plot["points"]]
+                    self.assertTrue(set(plotted_values).issubset(set(sleep_values)))
+                if "day of week" in prompt:
+                    self.assertEqual(plot["plot_spec"]["aggregation"], "day_of_week")
+                    self.assertLessEqual(plot["samples"], 7)
+                    self.assertTrue(all(point.get("category") for point in plot["points"]))
+
+        heatmap = app_module.build_plot_for_prompt(
+            "show a correlation heatmap for sleep, steps, awakenings, minutes awake, time in bed, and sleep efficiency"
+        )
+        self.assertTrue(heatmap["available"], heatmap)
+        self.assertEqual(heatmap["plot_type"], "heatmap")
+        self.assertEqual(heatmap["plot_spec"]["aggregation"], "daily_correlation")
+        labels = heatmap["correlation_matrix"]["labels"]
+        for label in ("Sleep Minutes", "Steps", "Awakenings", "Minutes Awake", "Time in Bed", "Sleep Efficiency"):
+            self.assertIn(label, labels)
+        for index, row in enumerate(heatmap["correlation_matrix"]["values"]):
+            self.assertEqual(row[index], 1.0)
+        self.assertIn("not causal", heatmap["message"])
+        self.assertEqual(heatmap["python_image"]["plot_type"], "heatmap")
 
     def test_sleep_entity_discovery_excludes_scenes_from_sensor_map(self):
         original_request = app_module.home_assistant_api_request
@@ -1033,8 +1141,17 @@ class PromptAppTests(unittest.TestCase):
         self.assertGreater(len(data["sensor_data"]["rows"]), 0)
 
     def test_relation_prompt_includes_mapped_sensor_sleep_alignment(self):
-        if not app_module.home_assistant_available():
-            self.skipTest("Home Assistant API is not available.")
+        self.write_fake_recorder_db(
+            {
+                "sensor.nick_r_sleep_minutes_asleep": [390, 405, 420, 435, 450, 465, 480, 495],
+                "sensor.nick_r_sleep_time_in_bed": [430, 445, 460, 475, 490, 505, 520, 535],
+                "sensor.nick_r_sleep_minutes_awake": [40, 40, 40, 40, 40, 40, 40, 40],
+                "sensor.nick_r_sleep_efficiency": [91, 91, 91, 92, 92, 92, 92, 93],
+                "sensor.nick_r_awakenings_count": [3, 3, 2, 2, 2, 1, 1, 1],
+                "sensor.nick_r_sleep_start_time": ["23:00"] * 8,
+                "binary_sensor.pantry_door_window": ["off", "on", "off", "off", "on", "off", "off", "on"],
+            }
+        )
 
         self.client.put(
             "/api/sensor-map",
@@ -1074,7 +1191,7 @@ class PromptAppTests(unittest.TestCase):
         try:
             response = self.client.post(
                 "/api/message",
-                json={"message": "Is there any relation to when I open the pantry door and my sleep?"},
+                json={"message": "Show me when I opened the pantry door around my sleep."},
             )
         finally:
             app_module.get_client = original_get_client
