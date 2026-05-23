@@ -591,9 +591,11 @@ claude_api_key: sk-ant-...</code></pre>
           leq: "≤",
           geq: "≥",
           neq: "≠",
+          in: "∈",
           infty: "∞",
           overline: "",
           bar: "",
+          hat: "",
           text: "",
         };
 
@@ -649,6 +651,14 @@ claude_api_key: sk-ant-...</code></pre>
                 const group = readGroup(text, index + 1);
                 html += `<span class="latex-overline">${renderFragment(group.value)}</span>`;
                 index = group.next - 1;
+              } else if (command === "hat") {
+                const group = readGroup(text, index + 1);
+                html += `<span class="latex-hat">${renderFragment(group.value)}</span>`;
+                index = group.next - 1;
+              } else if (command === "sqrt") {
+                const group = readGroup(text, index + 1);
+                html += `<span class="latex-sqrt">√<span class="latex-sqrt-radicand">${renderFragment(group.value)}</span></span>`;
+                index = group.next - 1;
               } else if (command === "text") {
                 const group = readGroup(text, index + 1);
                 html += `<span class="latex-text">${escapeHtml(group.value)}</span>`;
@@ -688,6 +698,7 @@ claude_api_key: sk-ant-...</code></pre>
         return escapeHtml(value)
           .replace(/\$\$([^$]+)\$\$/g, (_match, latex) => `<span class="math-inline">${renderLatexToHtml(latex)}</span>`)
           .replace(/\$([^$]+)\$/g, (_match, latex) => `<span class="math-inline">${renderLatexToHtml(latex)}</span>`)
+          .replace(/\\\((.+?)\\\)/g, (_match, latex) => `<span class="math-inline">${renderLatexToHtml(latex)}</span>`)
           .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
           .replace(/\*(.+?)\*/g, "<em>$1</em>")
           .replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -784,6 +795,48 @@ claude_api_key: sk-ant-...</code></pre>
           }
           if (!trimmed) {
             closeList();
+            continue;
+          }
+
+          if (trimmed.startsWith("$$")) {
+            closeList();
+            const blockLines = [];
+            const firstLine = trimmed.slice(2);
+            if (firstLine.endsWith("$$") && firstLine.length > 2) {
+              html.push(renderLatexBlock(firstLine.slice(0, -2)));
+              continue;
+            }
+            if (firstLine) blockLines.push(firstLine);
+            for (index += 1; index < lines.length; index += 1) {
+              const blockLine = lines[index];
+              if (blockLine.trim().endsWith("$$")) {
+                blockLines.push(blockLine.replace(/\$\$\s*$/, ""));
+                break;
+              }
+              blockLines.push(blockLine);
+            }
+            html.push(renderLatexBlock(blockLines.join("\n")));
+            continue;
+          }
+
+          if (trimmed.startsWith("\\[")) {
+            closeList();
+            const blockLines = [];
+            const firstLine = trimmed.slice(2);
+            if (firstLine.endsWith("\\]") && firstLine.length > 2) {
+              html.push(renderLatexBlock(firstLine.slice(0, -2)));
+              continue;
+            }
+            if (firstLine) blockLines.push(firstLine);
+            for (index += 1; index < lines.length; index += 1) {
+              const blockLine = lines[index];
+              if (blockLine.trim().endsWith("\\]")) {
+                blockLines.push(blockLine.replace(/\\]\s*$/, ""));
+                break;
+              }
+              blockLines.push(blockLine);
+            }
+            html.push(renderLatexBlock(blockLines.join("\n")));
             continue;
           }
 
@@ -897,15 +950,6 @@ claude_api_key: sk-ant-...</code></pre>
         }
 
         bubble.append(role, content);
-        if (message.role === "assistant") {
-          const stampText = modelStampText(message);
-          if (stampText) {
-            const stamp = document.createElement("div");
-            stamp.className = "model-stamp";
-            stamp.textContent = stampText;
-            bubble.appendChild(stamp);
-          }
-        }
         if (message.plot) {
           bubble.appendChild(buildPlotCard(message.plot));
         }
@@ -914,6 +958,15 @@ claude_api_key: sk-ant-...</code></pre>
         }
         if (message.analysis_visuals) {
           bubble.appendChild(buildAnalysisVisualsCard(message.analysis_visuals));
+        }
+        if (message.role === "assistant") {
+          const stampText = modelStampText(message);
+          if (stampText) {
+            const stamp = document.createElement("div");
+            stamp.className = "model-stamp";
+            stamp.textContent = stampText;
+            bubble.appendChild(stamp);
+          }
         }
         return bubble;
       }

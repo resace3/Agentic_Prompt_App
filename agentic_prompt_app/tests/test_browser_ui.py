@@ -145,7 +145,7 @@ def test_analysis_visual_artifacts_render_user_friendly_cards(page):
         () => {
           const svg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="120"><rect width="400" height="120" fill="white"/><text x="20" y="60">DAG</text></svg>');
           const visuals = {
-            title: 'N-of-1 Analysis Visuals',
+            title: 'Generated visuals',
             artifacts: [
               {type: 'plot', title: 'Association Plot', description: 'Readable plot', data_url: 'data:image/png;base64,iVBORw0KGgo='},
               {type: 'dag', title: 'Same-Day DAG', description: 'Readable DAG', data_url: `data:image/svg+xml;base64,${svg}`},
@@ -169,9 +169,88 @@ def test_analysis_visual_artifacts_render_user_friendly_cards(page):
         """
     )
 
-    assert result["title"] == "N-of-1 Analysis Visuals"
+    assert result["title"] == "Generated visuals"
     assert result["artifactCount"] == 3
     assert result["plotVisible"] is True
     assert result["dagVisible"] is True
     assert "∑" in result["latexText"]
     assert "latex-frac" in result["latexHtml"]
+
+
+def test_n_of_1_visual_response_stays_inside_assistant_card(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+    prompt = (
+        "Make plots describing the N-of-1 analysis, show causal DAGs, and show the LaTeX equations "
+        "for my time asleep sleep with non-sleep variables in the Sensor Map using "
+        "https://arxiv.org/abs/2407.17666"
+    )
+
+    page.set_viewport_size({"width": 820, "height": 720})
+    page.goto(base_url, wait_until="networkidle")
+    result = page.evaluate(
+        """
+        (prompt) => {
+          const wideSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="700"><rect width="2400" height="700" fill="white"/><text x="80" y="180" font-size="80">Wide visual should fit response card</text></svg>');
+          const message = {
+            role: 'assistant',
+            content: `For this request: ${prompt}\\n\\nThe deterministic N-of-1 analysis uses sensor.nick_r_sleep_minutes_asleep as the outcome and compares sensor.nick_r_steps plus binary_sensor.pantry_door_window. Inline math: \\\\(r = \\\\frac{a}{b}\\\\).\\n\\n$$\\\\hat{\\\\beta} = \\\\frac{\\\\sum_i X_iY_i}{\\\\sum_i X_i^2}$$`,
+            provider_label: 'OpenAI',
+            model_label: 'GPT-4.1 Nano',
+            model: 'gpt-4.1-nano',
+            analysis_visuals: {
+              title: 'Generated visuals',
+              artifacts: [
+                {type: 'plot', title: 'Association Plot', description: 'Plot caption', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                {type: 'dag', title: 'Same-Day DAG', description: 'DAG caption', data_url: `data:image/svg+xml;base64,${wideSvg}`},
+                {type: 'latex', title: 'Pearson correlation', description: 'Equation caption', latex: 'r = \\\\frac{\\\\sum_i (X_i-\\\\bar{X})(Y_i-\\\\bar{Y})}{\\\\sqrt{\\\\sum_i (X_i-\\\\bar{X})^2}}'}
+              ]
+            }
+          };
+          document.querySelector('#messages').innerHTML = '';
+          document.querySelector('#messages').appendChild(messageElement(message));
+
+          const bubble = document.querySelector('.message.assistant');
+          const content = bubble.querySelector('.content');
+          const visuals = bubble.querySelector('.analysis-visuals');
+          const plot = bubble.querySelector('.analysis-plot-image');
+          const dag = bubble.querySelector('.dag-image');
+          const latex = bubble.querySelector('.latex-equation');
+          const stamp = bubble.querySelector('.model-stamp');
+          const bubbleRect = bubble.getBoundingClientRect();
+          const plotRect = plot.getBoundingClientRect();
+          const dagRect = dag.getBoundingClientRect();
+          return {
+            prompt,
+            bubbleWidth: bubbleRect.width,
+            contentBeforeVisuals: !!(content.compareDocumentPosition(visuals) & Node.DOCUMENT_POSITION_FOLLOWING),
+            visualsBeforeStamp: !!(visuals.compareDocumentPosition(stamp) & Node.DOCUMENT_POSITION_FOLLOWING),
+            plotInside: plotRect.left >= bubbleRect.left - 1 && plotRect.right <= bubbleRect.right + 1,
+            dagInside: dagRect.left >= bubbleRect.left - 1 && dagRect.right <= bubbleRect.right + 1,
+            messagesOverflow: document.querySelector('#messages').scrollWidth <= document.querySelector('#messages').clientWidth + 1,
+            plotMaxWidth: getComputedStyle(plot).maxWidth,
+            dagMaxWidth: getComputedStyle(dag).maxWidth,
+            responseText: bubble.textContent,
+            latexHtml: latex.innerHTML,
+            inlineMathCount: bubble.querySelectorAll('.math-inline .latex-frac').length,
+            artifactTitles: Array.from(bubble.querySelectorAll('.analysis-artifact-title')).map((node) => node.textContent),
+          };
+        }
+        """,
+        prompt,
+    )
+
+    assert "sensor.nick_r_sleep_minutes_asleep" in result["prompt"] or "time asleep" in result["prompt"]
+    assert "sensor.nick_r_sleep_minutes_asleep" in result["responseText"]
+    assert "sensor.nick_r_steps" in result["responseText"]
+    assert "binary_sensor.pantry_door_window" in result["responseText"]
+    assert result["bubbleWidth"] <= 780
+    assert result["contentBeforeVisuals"] is True
+    assert result["visualsBeforeStamp"] is True
+    assert result["plotInside"] is True
+    assert result["dagInside"] is True
+    assert result["messagesOverflow"] is True
+    assert result["plotMaxWidth"] == "100%"
+    assert result["dagMaxWidth"] == "100%"
+    assert "latex-frac" in result["latexHtml"]
+    assert result["inlineMathCount"] >= 1
+    assert result["artifactTitles"] == ["Association Plot", "Same-Day DAG", "Pearson correlation"]

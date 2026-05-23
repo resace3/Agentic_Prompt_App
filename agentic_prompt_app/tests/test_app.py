@@ -368,6 +368,7 @@ class PromptAppTests(unittest.TestCase):
                 ],
                 "sensor.nick_r_sleep_minutes_to_fall_asleep": [18, 16, 14, 12, 10, 8, 6, 4],
                 "sensor.nick_r_steps": [3000, 3500, 4200, 4900, 5600, 6300, 7000, 7700],
+                "binary_sensor.pantry_door_window": ["off", "off", "on", "off", "on", "off", "off", "on"],
                 "sensor.nutribullet_plug_current": [0, 0, 1.2, 0, 1.5, 0, 0.8, 0],
             }
         )
@@ -380,6 +381,7 @@ class PromptAppTests(unittest.TestCase):
                         "description": "Sleep minutes to fall asleep",
                     },
                     {"sensor": "sensor.nick_r_steps", "description": "Daily steps"},
+                    {"sensor": "binary_sensor.pantry_door_window", "description": "Pantry door open/closed state"},
                     {"sensor": "sensor.nutribullet_plug_current", "description": "NutriBullet plug current amps"},
                 ]
             },
@@ -390,6 +392,7 @@ class PromptAppTests(unittest.TestCase):
                 prompt = kwargs["input"]
                 assert "n_of_1_analysis:" in prompt
                 assert "sensor.nick_r_steps" in prompt
+                assert "binary_sensor.pantry_door_window" in prompt
                 assert "pearson_r" in prompt
                 assert "https://arxiv.org/abs/2407.17666" in prompt
                 assert "mapped_sensor_history: []" in prompt
@@ -411,10 +414,9 @@ class PromptAppTests(unittest.TestCase):
                 "/api/message",
                 json={
                     "message": (
-                        "do a correlation and N of 1 Inference using the methods in this paper "
-                        "for my time asleep sleep with other variables in the sensor map:"
-                        "https://arxiv.org/abs/2407.17666 and make plots describing the analysis, "
-                        "show causal DAGs, and show the LaTeX equations"
+                        "Make plots describing the N-of-1 analysis, show causal DAGs, and show "
+                        "the LaTeX equations for my time asleep sleep with non-sleep variables "
+                        "in the Sensor Map using https://arxiv.org/abs/2407.17666"
                     ),
                     "provider": "openai",
                     "model": "gpt-4.1-nano",
@@ -436,6 +438,7 @@ class PromptAppTests(unittest.TestCase):
         self.assertGreater(first_lag["pearson_r"], 0.9)
         visuals = data["analysis_visuals"]
         self.assertTrue(visuals["available"])
+        self.assertEqual(visuals["title"], "Generated visuals")
         artifact_types = [artifact["type"] for artifact in visuals["artifacts"]]
         self.assertIn("plot", artifact_types)
         self.assertGreaterEqual(artifact_types.count("dag"), 2)
@@ -1432,7 +1435,7 @@ class PromptAppTests(unittest.TestCase):
             + renderer_source
             + """
             const visuals={
-              title:'N-of-1 Analysis Visuals',
+              title:'Generated visuals',
               artifacts:[
                 {type:'plot',title:'Association Plot',description:'Associations',data_url:'data:image/png;base64,plot'},
                 {type:'dag',title:'Same-Day DAG',description:'DAG',data_url:'data:image/svg+xml;base64,dag'},

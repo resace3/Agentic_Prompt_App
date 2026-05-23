@@ -2543,7 +2543,7 @@ def build_analysis_visuals(user_text, ha_summary):
     artifacts.extend({"type": "latex", **equation} for equation in n_of_1_latex_equations())
     return {
         "available": True,
-        "title": "N-of-1 Analysis Visuals",
+        "title": "Generated visuals",
         "artifacts": artifacts,
         "summary": "Rendered deterministic association plot, causal DAGs, and LaTeX equations for the N-of-1 analysis.",
     }
