@@ -327,20 +327,15 @@ jobs:
           fi
           echo "::add-mask::$OPENAI_API_KEY"
 
-          docker exec "$CONTAINER" bash -lc "mkdir -p /mnt/supervisor/homeassistant"
-          docker exec -e OPENAI_API_KEY="$OPENAI_API_KEY" "$CONTAINER" bash -lc \
-            "python3 - <<'PY'
-          import os
-          from pathlib import Path
+          SECRET_FILE="${RUNNER_TEMP}/secrets.yaml"
+          RECORDER_DB="${RUNNER_TEMP}/home-assistant_v2.db"
+          printf 'openai_api_key: %s\n' "$OPENAI_API_KEY" > "$SECRET_FILE"
+          printf 'SQLite format 3\000' > "$RECORDER_DB"
 
-          config = Path('/mnt/supervisor/homeassistant')
-          config.mkdir(parents=True, exist_ok=True)
-          (config / 'secrets.yaml').write_text(
-              'openai_api_key: ' + os.environ['OPENAI_API_KEY'] + '\n',
-              encoding='utf-8',
-          )
-          (config / 'home-assistant_v2.db').write_bytes(b'SQLite format 3\x00')
-          PY"
+          docker exec "$CONTAINER" bash -lc "mkdir -p /mnt/supervisor/homeassistant"
+          docker cp "$SECRET_FILE" "$CONTAINER":/mnt/supervisor/homeassistant/secrets.yaml
+          docker cp "$RECORDER_DB" "$CONTAINER":/mnt/supervisor/homeassistant/home-assistant_v2.db
+          docker exec "$CONTAINER" bash -lc "chmod 600 /mnt/supervisor/homeassistant/secrets.yaml"
           docker exec "$CONTAINER" bash -lc "ls -l /mnt/supervisor/homeassistant/home-assistant_v2.db /mnt/supervisor/homeassistant/secrets.yaml"
 
       - name: Install And Start Add-on
