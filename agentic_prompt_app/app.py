@@ -2541,9 +2541,7 @@ def n_of_1_computed_results(analysis):
                     "lag_days": association.get("lag_days"),
                     "pearson_r": association.get("pearson_r"),
                     "n": association.get("n"),
-                    "slope_minutes_asleep_per_feature_unit": association.get(
-                        "slope_minutes_asleep_per_feature_unit"
-                    ),
+                    "slope_minutes_asleep_per_feature_unit": association.get("slope_minutes_asleep_per_feature_unit"),
                 }
             )
     rows = sorted(rows, key=lambda row: abs(float(row.get("pearson_r") or 0)), reverse=True)
