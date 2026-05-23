@@ -365,6 +365,7 @@ class PromptAppTests(unittest.TestCase):
                     "22:45",
                     "22:40",
                 ],
+                "sensor.nick_r_sleep_minutes_to_fall_asleep": [18, 16, 14, 12, 10, 8, 6, 4],
                 "sensor.nick_r_steps": [3000, 3500, 4200, 4900, 5600, 6300, 7000, 7700],
                 "sensor.nutribullet_plug_current": [0, 0, 1.2, 0, 1.5, 0, 0.8, 0],
             }
@@ -373,6 +374,10 @@ class PromptAppTests(unittest.TestCase):
             "/api/sensor-map",
             json={
                 "sensors": [
+                    {
+                        "sensor": "sensor.nick_r_sleep_minutes_to_fall_asleep",
+                        "description": "Sleep minutes to fall asleep",
+                    },
                     {"sensor": "sensor.nick_r_steps", "description": "Daily steps"},
                     {"sensor": "sensor.nutribullet_plug_current", "description": "NutriBullet plug current amps"},
                 ]
@@ -386,6 +391,7 @@ class PromptAppTests(unittest.TestCase):
                 assert "sensor.nick_r_steps" in prompt
                 assert "pearson_r" in prompt
                 assert "https://arxiv.org/abs/2407.17666" in prompt
+                assert "mapped_sensor_history: []" in prompt
                 return SimpleNamespace(
                     id="resp_test",
                     output_text=(
@@ -420,6 +426,8 @@ class PromptAppTests(unittest.TestCase):
         analysis = data["home_assistant_context"]["n_of_1_analysis"]
         self.assertTrue(analysis["available"])
         self.assertEqual(analysis["outcome"]["metric"], "minutes_asleep")
+        ranked_sensors = {row["sensor"] for row in analysis["ranked_associations"]}
+        self.assertNotIn("sensor.nick_r_sleep_minutes_to_fall_asleep", ranked_sensors)
         self.assertEqual(analysis["ranked_associations"][0]["sensor"], "sensor.nick_r_steps")
         first_lag = analysis["ranked_associations"][0]["lagged_associations"][0]
         self.assertGreaterEqual(first_lag["n"], 7)

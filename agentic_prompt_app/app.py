@@ -2792,6 +2792,11 @@ def should_build_n_of_1_analysis(user_text):
     return mentions_sleep and (relation_requested or n_of_1_requested)
 
 
+def is_sleep_related_sensor(entity_id):
+    lowered = str(entity_id or "").lower()
+    return lowered in SLEEP_METRIC_ENTITIES.values() or any(term in lowered for term in SLEEP_ENTITY_TERMS)
+
+
 def pearson_correlation(x_values, y_values):
     pairs = [(float(x), float(y)) for x, y in zip(x_values, y_values) if x is not None and y is not None]
     if len(pairs) < 3:
@@ -2832,7 +2837,7 @@ def sensor_daily_feature(row, days):
     if not sensor:
         result["message"] = "Sensor map row has no entity ID."
         return result
-    if sensor in SLEEP_METRIC_ENTITIES.values():
+    if is_sleep_related_sensor(sensor):
         result["message"] = "Sleep outcome sensors are excluded as predictors."
         return result
 
@@ -2931,7 +2936,7 @@ def build_n_of_1_sleep_analysis(user_text, days, completed_sleep=None):
         }
 
     mapped_rows = [row for row in load_sensor_map()["sensors"] if row.get("sensor")]
-    predictor_rows = [row for row in mapped_rows if row.get("sensor") not in SLEEP_METRIC_ENTITIES.values()]
+    predictor_rows = [row for row in mapped_rows if not is_sleep_related_sensor(row.get("sensor"))]
     sleep_by_date = {
         record["date"]: float(record["minutes_asleep"])
         for record in completed_sleep.get("daily", [])
@@ -3229,6 +3234,8 @@ def summarize_home_assistant_prompt_context(user_text, days):
     if include_sleep:
         sleep_entities = set(SLEEP_METRIC_ENTITIES.values())
         mapped_history_rows = [row for row in mapped_rows if row.get("sensor") not in sleep_entities]
+    if include_n_of_1:
+        mapped_history_rows = []
     include_mapped_history = should_include_mapped_sensor_history(
         user_text,
         mapped_rows=mapped_history_rows,
@@ -3269,7 +3276,8 @@ def summarize_home_assistant_prompt_context(user_text, days):
             "If n_of_1_analysis is present, use ranked_associations for any correlation "
             "or N-of-1 inference answer; report N, lag, Pearson r, slope, date range, "
             "and the observational limitation. Do not invent causal claims beyond this "
-            "deterministic analysis. "
+            "deterministic analysis. Do not compute correlations from sensor_map or "
+            "mapped_sensor_history when n_of_1_analysis is available. "
             "Use mapped_sensor_history for any Sensor Maps entity mentioned by the user, "
             "including non-sleep entities such as doors, lights, motion, plugs, or other "
             "Home Assistant sensors. For sleep questions, use completed_sleep as the "
