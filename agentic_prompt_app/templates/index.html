@@ -62,15 +62,6 @@ claude_api_key: sk-ant-...</code></pre>
           </div>
         </section>
 
-        <section id="setupPanel" class="setup-panel" data-state="warning">
-          <div>
-            <strong>Setup diagnostics</strong>
-            <p id="setupStatusText">Checking static assets, API responses, Home Assistant access, and API key setup...</p>
-          </div>
-          <button id="setupToggleButton" type="button" aria-expanded="false">Details</button>
-          <div id="setupDetails" class="setup-details" hidden></div>
-        </section>
-
         <nav class="tabs" aria-label="Main sections">
           <button class="tab active" type="button" data-tab="prompts">Prompts</button>
           <button class="tab" type="button" data-tab="sensorMaps">Sensor Maps</button>
@@ -131,10 +122,6 @@ claude_api_key: sk-ant-...</code></pre>
       const keyStatusText = document.querySelector("#keyStatusText");
       const keyHelpButton = document.querySelector("#keyHelpButton");
       const keyHelpPanel = document.querySelector("#keyHelpPanel");
-      const setupPanel = document.querySelector("#setupPanel");
-      const setupStatusText = document.querySelector("#setupStatusText");
-      const setupToggleButton = document.querySelector("#setupToggleButton");
-      const setupDetails = document.querySelector("#setupDetails");
       const providerSelect = document.querySelector("#providerSelect");
       const modelSelect = document.querySelector("#modelSelect");
       const modelPrice = document.querySelector("#modelPrice");
@@ -233,61 +220,6 @@ claude_api_key: sk-ant-...</code></pre>
           throw new Error(`Empty response body from ${path} with status ${response.status}.`);
         }
         return { response, data };
-      }
-
-      function renderSetupDiagnostics(data) {
-        const checks = data && Array.isArray(data.checks) ? data.checks : [];
-        const failed = checks.filter((check) => !check.ok && !["not_required", "observed"].includes(check.status));
-        setupPanel.dataset.state = failed.length ? "warning" : "ready";
-        setupStatusText.textContent = data && data.message
-          ? data.message
-          : "Diagnostics unavailable.";
-        setupDetails.innerHTML = "";
-        for (const check of checks) {
-          const item = document.createElement("div");
-          item.className = "setup-check";
-          item.dataset.state = check.ok ? "ready" : check.status;
-          const title = document.createElement("strong");
-          title.textContent = `${check.name}: ${check.status}`;
-          const message = document.createElement("p");
-          message.textContent = check.message || "";
-          item.append(title, message);
-          if (Array.isArray(check.fix_steps) && check.fix_steps.length) {
-            const list = document.createElement("ul");
-            for (const step of check.fix_steps) {
-              const li = document.createElement("li");
-              li.textContent = step;
-              list.appendChild(li);
-            }
-            item.appendChild(list);
-          }
-          setupDetails.appendChild(item);
-        }
-      }
-
-      async function refreshDiagnostics() {
-        const cssLoaded = getComputedStyle(document.documentElement)
-          .getPropertyValue("--prompt-flow-css-loaded")
-          .trim() === "yes";
-        const jsAssetLoaded = Boolean(window.PROMPT_FLOW_STATIC_JS_LOADED);
-        if (!cssLoaded || !jsAssetLoaded) {
-          setupPanel.dataset.state = "warning";
-          setupStatusText.textContent = "Static assets may not have loaded correctly. Check CSS and JS diagnostics below.";
-        }
-        try {
-          const { response, data } = await fetchJson("/api/diagnostics");
-          if (!response.ok) {
-            throw new Error(errorMessageFromData(data, "Diagnostics failed."));
-          }
-          renderSetupDiagnostics(data);
-          if (!cssLoaded || !jsAssetLoaded) {
-            setupPanel.dataset.state = "warning";
-            setupStatusText.textContent = "The backend can see static assets, but this browser did not confirm CSS or JS startup.";
-          }
-        } catch (error) {
-          setupPanel.dataset.state = "warning";
-          setupStatusText.textContent = `Diagnostics unavailable: ${error.message}`;
-        }
       }
 
       function providerKeyLabel(providerId) {
@@ -1112,11 +1044,6 @@ claude_api_key: sk-ant-...</code></pre>
         renderKeyStatus();
       });
       modelSelect.addEventListener("change", updateModelPrice);
-      setupToggleButton.addEventListener("click", () => {
-        const shouldShow = setupDetails.hidden;
-        setupDetails.hidden = !shouldShow;
-        setupToggleButton.setAttribute("aria-expanded", String(shouldShow));
-      });
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -1215,7 +1142,6 @@ claude_api_key: sk-ant-...</code></pre>
 
       renderKeyStatus();
       refreshKeyStatus();
-      refreshDiagnostics();
       loadMessages();
     </script>
   </body>

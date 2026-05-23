@@ -22,7 +22,8 @@ def test_prompt_flow_shell_loads(page):
     assert page.locator("#chatList").is_visible()
     assert page.locator("#newChatButton").is_visible()
     assert page.locator("#modelSelect").input_value() == "gpt-4.1-nano"
-    assert page.locator("#setupPanel").is_visible()
+    assert page.locator("#setupPanel").count() == 0
+    assert page.get_by_text("Setup diagnostics").count() == 0
     assert page.locator("#keyStatus").is_visible()
     assert page.evaluate("window.PROMPT_FLOW_STATIC_JS_LOADED") is True
     css_loaded = page.evaluate(
@@ -33,7 +34,7 @@ def test_prompt_flow_shell_loads(page):
     assert failed_requests == []
 
 
-def test_key_help_and_setup_diagnostics_are_visible(page):
+def test_key_help_is_visible_without_setup_diagnostics_panel(page):
     base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
 
     page.goto(base_url, wait_until="networkidle")
@@ -43,7 +44,8 @@ def test_key_help_and_setup_diagnostics_are_visible(page):
     assert page.locator("#keyHelpPanel").inner_text().find("/config/secrets.yaml") >= 0
     assert page.locator("#keyHelpPanel").inner_text().find("openai_api_key") >= 0
     assert page.locator("#keyHelpPanel").inner_text().find("claude_api_key") >= 0
-    assert page.locator("#setupStatusText").inner_text()
+    assert page.locator("#setupStatusText").count() == 0
+    assert page.get_by_text("Setup diagnostics").count() == 0
 
 
 def tab_layout_snapshot(page):
