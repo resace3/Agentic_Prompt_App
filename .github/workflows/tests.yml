@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      live_openai_smoke:
+        description: "Run live OpenAI GPT-4.1 Nano add-on smoke test"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -255,6 +261,266 @@ jobs:
           echo "Add-on health endpoint did not respond"
           docker exec "$CONTAINER" bash -lc "docker logs '$ADDON_CONTAINER'" || true
           exit 1
+
+      - name: Dump Supervisor Logs (on failure)
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker inspect ha-addon-dev || true
+          docker logs ha-addon-dev || true
+          docker exec ha-addon-dev bash -lc "tail -n 200 /tmp/supervisor_run.log" || true
+          docker exec ha-addon-dev bash -lc "docker ps -a" || true
+          docker exec ha-addon-dev bash -lc "ha --no-progress supervisor logs --lines 200" || true
+
+  live-openai-addon-smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 35
+    if: github.event_name == 'workflow_dispatch' && inputs.live_openai_smoke == true
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Supervisor Devcontainer
+        run: |
+          set -euo pipefail
+          CONTAINER=ha-addon-dev
+          docker run -d --name "$CONTAINER" --privileged \
+            -e GIT_EDITOR="code --wait" \
+            -e WORKSPACE_DIRECTORY="/workspaces/${{ github.event.repository.name }}" \
+            -v "${{ github.workspace }}:/workspaces/${{ github.event.repository.name }}" \
+            -v /var/lib/docker \
+            -v /mnt/supervisor \
+            --entrypoint bash \
+            ghcr.io/home-assistant/devcontainer:2-addons -lc "sleep infinity"
+          docker exec "$CONTAINER" bash -lc "sudo chmod a+x /usr/bin/supervisor_* /usr/bin/ha || true"
+          docker exec "$CONTAINER" bash -lc "sudo -E bash devcontainer_bootstrap"
+          docker exec "$CONTAINER" bash -lc "sudo sed -i 's/stty sane/stty sane || true/' /etc/supervisor_scripts/common"
+          docker exec "$CONTAINER" bash -lc "sudo -E supervisor_run >/tmp/supervisor_run.log 2>&1 & echo \$! >/tmp/supervisor_run.pid"
+
+          echo "Waiting for Supervisor..."
+          for i in {1..60}; do
+            if docker exec "$CONTAINER" bash -lc "ha --no-progress supervisor info" > /dev/null 2>&1; then
+              echo "Supervisor is ready"
+              exit 0
+            fi
+            if ! docker exec "$CONTAINER" bash -lc "kill -0 \$(cat /tmp/supervisor_run.pid)" > /dev/null 2>&1; then
+              echo "supervisor_run exited before Supervisor became ready"
+              docker exec "$CONTAINER" bash -lc "tail -n 200 /tmp/supervisor_run.log" || true
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Supervisor did not become ready in time"
+          docker exec "$CONTAINER" bash -lc "tail -n 200 /tmp/supervisor_run.log" || true
+          docker exec "$CONTAINER" bash -lc "docker ps -a" || true
+          exit 1
+
+      - name: Seed Fake Home Assistant Data
+        run: |
+          set -euo pipefail
+          CONTAINER=ha-addon-dev
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY repository secret is required for live_openai_smoke."
+            exit 1
+          fi
+          echo "::add-mask::$OPENAI_API_KEY"
+
+          docker exec "$CONTAINER" bash -lc "mkdir -p /mnt/supervisor/homeassistant"
+          docker exec -e OPENAI_API_KEY="$OPENAI_API_KEY" "$CONTAINER" bash -lc \
+            "python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          config = Path('/mnt/supervisor/homeassistant')
+          config.mkdir(parents=True, exist_ok=True)
+          (config / 'secrets.yaml').write_text(
+              'openai_api_key: ' + os.environ['OPENAI_API_KEY'] + '\n',
+              encoding='utf-8',
+          )
+          (config / 'home-assistant_v2.db').write_bytes(b'SQLite format 3\x00')
+          PY"
+          docker exec "$CONTAINER" bash -lc "ls -l /mnt/supervisor/homeassistant/home-assistant_v2.db /mnt/supervisor/homeassistant/secrets.yaml"
+
+      - name: Install And Start Add-on
+        run: |
+          set -euo pipefail
+          CONTAINER=ha-addon-dev
+          docker exec "$CONTAINER" bash -lc "ha --no-progress jobs options --ignore-conditions healthy"
+
+          if docker exec "$CONTAINER" bash -lc "ha --no-progress addons install agentic_prompt_app"; then
+            SLUG=agentic_prompt_app
+          elif docker exec "$CONTAINER" bash -lc "ha --no-progress addons install local_agentic_prompt_app"; then
+            SLUG=local_agentic_prompt_app
+          else
+            echo "Failed to install add-on (agentic_prompt_app or local_agentic_prompt_app)"
+            exit 1
+          fi
+
+          docker exec "$CONTAINER" bash -lc "ha --no-progress addons start $SLUG"
+          docker exec "$CONTAINER" bash -lc "ha --no-progress addons info $SLUG" | grep -q "state: started"
+          echo "$SLUG" > /tmp/addon_slug
+
+      - name: Run Four-Call GPT-4.1 Nano Smoke
+        run: |
+          set -euo pipefail
+          CONTAINER=ha-addon-dev
+          ADDON_CONTAINER=""
+          for i in $(seq 1 60); do
+            ADDON_CONTAINER="$(
+              docker exec "$CONTAINER" bash -lc \
+                "docker ps --format '{{.Names}} {{.Image}}' | awk '/agentic_prompt_app|local_agentic_prompt_app/ { print \$1; exit }'"
+            )"
+            if [ -n "$ADDON_CONTAINER" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$ADDON_CONTAINER" ]; then
+            echo "Could not find started add-on container"
+            docker exec "$CONTAINER" bash -lc "docker ps -a" || true
+            exit 1
+          fi
+
+          docker exec "$CONTAINER" bash -lc "docker exec '$ADDON_CONTAINER' python3 - <<'PY'
+          import json
+          import sys
+          import urllib.error
+          import urllib.request
+
+          BASE_URL = 'http://127.0.0.1:5000'
+          MODEL = 'gpt-4.1-nano'
+          MAX_GPT_CALLS = 4
+          gpt_call_count = 0
+
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+
+          def request_json(path, method='GET', payload=None):
+              data = None
+              headers = {'Accept': 'application/json'}
+              if payload is not None:
+                  data = json.dumps(payload).encode('utf-8')
+                  headers['Content-Type'] = 'application/json'
+              request = urllib.request.Request(
+                  BASE_URL + path,
+                  data=data,
+                  headers=headers,
+                  method=method,
+              )
+              try:
+                  with opener.open(request, timeout=120) as response:
+                      body = response.read().decode('utf-8')
+                      return response.status, json.loads(body) if body else {}
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode('utf-8', errors='replace')
+                  try:
+                      parsed = json.loads(body)
+                  except json.JSONDecodeError:
+                      parsed = {'raw': body[:400]}
+                  return exc.code, parsed
+
+          def assert_ok(condition, message):
+              if not condition:
+                  raise AssertionError(message)
+
+          def send_gpt_prompt(chat_id, prompt):
+              global gpt_call_count
+              if gpt_call_count >= MAX_GPT_CALLS:
+                  raise AssertionError('Refusing to call GPT more than 4 times')
+              gpt_call_count += 1
+              status, data = request_json(
+                  '/api/message',
+                  method='POST',
+                  payload={
+                      'message': prompt,
+                      'provider': 'openai',
+                      'model': MODEL,
+                      'chat_id': chat_id,
+                  },
+              )
+              assert_ok(status == 200, f'GPT call {gpt_call_count} failed with {status}: {data}')
+              assert_ok(data.get('provider') == 'openai', data)
+              assert_ok(data.get('model') == MODEL, data)
+              assert_ok((data.get('assistant') or '').strip(), data)
+              return data
+
+          for path in (
+              '/api/health',
+              '/api/config-status',
+              '/api/diagnostics',
+              '/static/styles.css',
+              '/static/app.js',
+          ):
+              request = urllib.request.Request(BASE_URL + path, headers={'Accept': '*/*'})
+              with opener.open(request, timeout=30) as response:
+                  assert_ok(response.status == 200, f'{path} returned {response.status}')
+                  response.read()
+
+          status, sensor_map = request_json(
+              '/api/sensor-map',
+              method='PUT',
+              payload={
+                  'sensors': [
+                      {
+                          'sensor': 'sensor.fake_sleep_minutes_asleep',
+                          'description': 'Fake sleep minutes asleep',
+                      },
+                      {
+                          'sensor': 'sensor.fake_sleep_efficiency',
+                          'description': 'Fake sleep efficiency percentage',
+                      },
+                      {
+                          'sensor': 'binary_sensor.fake_pantry_door',
+                          'description': 'Fake pantry door open/closed state',
+                      },
+                      {
+                          'sensor': 'sensor.fake_kitchen_motion_count',
+                          'description': 'Fake kitchen motion count',
+                      },
+                  ],
+              },
+          )
+          assert_ok(status == 200, sensor_map)
+          assert_ok(len(sensor_map.get('sensors', [])) == 4, sensor_map)
+
+          chat_ids = []
+          for _ in range(4):
+              status, chat = request_json('/api/chats', method='POST')
+              assert_ok(status == 201, chat)
+              chat_ids.append(chat['active_chat_id'])
+
+          prompts = [
+              'In one short sentence, summarize the fake sleep minutes sensor map entry.',
+              'In one short sentence, explain what fake sleep efficiency could mean.',
+              'In one short sentence, describe what the fake pantry door sensor tracks.',
+              'In one short sentence, describe what fake kitchen motion count tracks.',
+          ]
+          for chat_id, prompt in zip(chat_ids, prompts):
+              send_gpt_prompt(chat_id, prompt)
+
+          assert_ok(gpt_call_count == 4, f'Expected exactly 4 GPT calls, got {gpt_call_count}')
+
+          for chat_id in chat_ids[:2]:
+              status, data = request_json(f'/api/chats/{chat_id}', method='PATCH', payload={'pinned': True})
+              assert_ok(status == 200, data)
+
+          status, data = request_json('/api/chats')
+          assert_ok(status == 200, data)
+          returned = data.get('chats', [])
+          assert_ok([chat['id'] for chat in returned[:2]] == chat_ids[:2], returned)
+          assert_ok(all(chat.get('pinned') for chat in returned[:2]), returned)
+
+          deleted_id = chat_ids[3]
+          status, data = request_json(f'/api/chats/{deleted_id}', method='DELETE')
+          assert_ok(status == 200, data)
+          remaining_ids = {chat['id'] for chat in data.get('chats', [])}
+          assert_ok(deleted_id not in remaining_ids, data)
+
+          assert_ok(gpt_call_count == 4, f'Pin/delete must not call GPT; got {gpt_call_count}')
+          print(json.dumps({'ok': True, 'gpt_call_count': gpt_call_count, 'model': MODEL}, sort_keys=True))
+          PY"
 
       - name: Dump Supervisor Logs (on failure)
         if: failure()
