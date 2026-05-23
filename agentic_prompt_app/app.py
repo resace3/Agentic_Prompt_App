@@ -395,11 +395,26 @@ def handle_unexpected_exception(exc):
 
 
 SLEEP_METRIC_ENTITIES = {
+    "awakenings": "sensor.nick_r_awakenings_count",
     "minutes_asleep": "sensor.nick_r_sleep_minutes_asleep",
     "time_in_bed": "sensor.nick_r_sleep_time_in_bed",
     "minutes_awake": "sensor.nick_r_sleep_minutes_awake",
     "efficiency": "sensor.nick_r_sleep_efficiency",
     "start_time": "sensor.nick_r_sleep_start_time",
+}
+SLEEP_PLOT_METRIC_LABELS = {
+    "awakenings": "Awakenings",
+    "minutes_asleep": "Sleep Time",
+    "time_in_bed": "Time In Bed",
+    "minutes_awake": "Minutes Awake",
+    "efficiency": "Sleep Efficiency",
+}
+SLEEP_PLOT_METRIC_UNITS = {
+    "awakenings": "count",
+    "minutes_asleep": "minutes",
+    "time_in_bed": "minutes",
+    "minutes_awake": "minutes",
+    "efficiency": "percent",
 }
 
 
@@ -1255,6 +1270,8 @@ def summarize_completed_sleep(days=7):
             "efficiency": int(round(values["efficiency"]["value"])),
             "updated_local": max(values[metric]["updated_local"] for metric in required_metrics),
         }
+        if "awakenings" in values:
+            record["awakenings"] = int(round(values["awakenings"]["value"]))
         record["sleep_label"] = minutes_to_hours_label(record["minutes_asleep"])
         record["time_in_bed_label"] = minutes_to_hours_label(record["time_in_bed"])
         records.append(record)
@@ -1505,11 +1522,124 @@ def sleep_metric_for_entity(entity_id):
 def plot_axis_label(plot):
     metric = plot.get("metric") if plot else None
     if metric:
-        return metric.replace("_", " ").title()
+        label = SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+        unit = SLEEP_PLOT_METRIC_UNITS.get(metric)
+        return f"{label} ({unit})" if unit else label
     return "Value"
 
 
+def encoded_matplotlib_figure(fig):
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def render_multi_series_python_plot(plot):
+    series = plot.get("series") or []
+    series = [item for item in series if item.get("points")]
+    if not series:
+        return None
+
+    fig, ax_minutes = plt.subplots(figsize=(9.6, 4.8), dpi=140)
+    fig.patch.set_facecolor("#ffffff")
+    ax_minutes.set_facecolor("#ffffff")
+    axes_by_unit = {"minutes": ax_minutes}
+    colors = ["#2563eb", "#dc2626", "#059669", "#7c3aed", "#ea580c"]
+
+    for index, item in enumerate(series):
+        unit = item.get("unit") or "value"
+        axis = axes_by_unit.get(unit)
+        if axis is None:
+            axis = ax_minutes.twinx()
+            axes_by_unit[unit] = axis
+        points = item["points"]
+        x_values = [datetime.fromtimestamp(float(point["timestamp"]), timezone.utc) for point in points]
+        y_values = [float(point["value"]) for point in points]
+        color = colors[index % len(colors)]
+        axis.plot(
+            x_values,
+            y_values,
+            linewidth=2.2,
+            marker="o",
+            markersize=4,
+            color=color,
+            label=item.get("label") or item.get("metric") or item.get("sensor"),
+        )
+        axis.tick_params(axis="y", colors=color, labelsize=8)
+        axis.spines["right" if axis is not ax_minutes else "left"].set_color(color)
+
+    ax_minutes.set_title(
+        plot.get("title") or "Sleep Metrics",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+        color="#111827",
+        pad=12,
+    )
+    ax_minutes.set_xlabel("Date", fontsize=10, fontweight="bold", color="#334155")
+    ax_minutes.set_ylabel("Sleep Time (minutes)", fontsize=10, fontweight="bold", color="#2563eb")
+    if "count" in axes_by_unit:
+        axes_by_unit["count"].set_ylabel(
+            "Awakenings (count)",
+            fontsize=10,
+            fontweight="bold",
+            color="#dc2626",
+        )
+    if "percent" in axes_by_unit:
+        axes_by_unit["percent"].set_ylabel("Percent", fontsize=10, fontweight="bold")
+    ax_minutes.grid(True, color="#e2e8f0", linewidth=0.8)
+    ax_minutes.spines["top"].set_visible(False)
+    ax_minutes.spines["bottom"].set_color("#cbd5e1")
+    ax_minutes.tick_params(axis="x", colors="#64748b", labelsize=8)
+    ax_minutes.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
+    fig.autofmt_xdate(rotation=30, ha="right")
+
+    lines = []
+    labels = []
+    for axis in dict.fromkeys(axes_by_unit.values()):
+        axis_lines, axis_labels = axis.get_legend_handles_labels()
+        lines.extend(axis_lines)
+        labels.extend(axis_labels)
+    ax_minutes.legend(lines, labels, loc="upper left", fontsize=8, frameon=False)
+
+    stats = "; ".join(
+        (
+            f"{item.get('label')}: min {item.get('min')}, "
+            f"avg {item.get('average')}, max {item.get('max')}, "
+            f"latest {item.get('latest')}"
+        )
+        for item in series
+    )
+    ax_minutes.text(
+        0,
+        -0.28,
+        stats,
+        transform=ax_minutes.transAxes,
+        fontsize=8.2,
+        color="#64748b",
+        va="top",
+    )
+    fig.tight_layout(rect=[0, 0.1, 1, 1])
+    y_axis_label = "; ".join(
+        f"{item.get('label')} ({item.get('unit')})" for item in series if item.get("label")
+    )
+
+    return {
+        "data_url": encoded_matplotlib_figure(fig),
+        "format": "png",
+        "renderer": "matplotlib",
+        "x_axis_label": "Date",
+        "y_axis_label": y_axis_label,
+        "title": plot.get("title") or "Sleep Metrics",
+        "series_count": len(series),
+    }
+
+
 def render_python_plot(plot):
+    if plot and plot.get("series"):
+        return render_multi_series_python_plot(plot)
     if not plot or not plot.get("available") or not plot.get("points"):
         return None
 
@@ -1553,12 +1683,8 @@ def render_python_plot(plot):
     )
     fig.tight_layout(rect=[0, 0.08, 1, 1])
 
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return {
-        "data_url": f"data:image/png;base64,{encoded}",
+        "data_url": encoded_matplotlib_figure(fig),
         "format": "png",
         "renderer": "matplotlib",
         "x_axis_label": "Date",
@@ -1622,6 +1748,8 @@ def query_cleaned_sleep_points(entity_id, days=30):
     return {
         "available": True,
         "sensor": entity_id,
+        "label": SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title()),
+        "unit": SLEEP_PLOT_METRIC_UNITS.get(metric, "value"),
         "days": summary["days_requested"],
         "points": points,
         "min": round(min(values), 2),
@@ -1632,6 +1760,107 @@ def query_cleaned_sleep_points(entity_id, days=30):
         "cleaned": True,
         "source": "completed_sleep",
         "metric": metric,
+        "date_range": summary["date_range"],
+    }
+
+
+def requested_sleep_plot_metrics(user_text):
+    lowered = user_text.lower()
+    if "sleep" not in lowered and "asleep" not in lowered:
+        return []
+
+    metrics = []
+    if any(term in lowered for term in ("awakening", "awakenings", "awake count", "wakeup count")):
+        metrics.append("awakenings")
+    if any(term in lowered for term in ("sleep time", "sleep duration", "minutes asleep", "time asleep", "asleep")):
+        metrics.append("minutes_asleep")
+    elif "sleep" in lowered:
+        metrics.append("minutes_asleep")
+    if "time in bed" in lowered:
+        metrics.append("time_in_bed")
+    if "efficiency" in lowered:
+        metrics.append("efficiency")
+    if "minutes awake" in lowered or "awake time" in lowered:
+        metrics.append("minutes_awake")
+
+    deduped = []
+    for metric in metrics:
+        if metric not in deduped:
+            deduped.append(metric)
+    return deduped
+
+
+def build_multi_sleep_plot(metrics, days):
+    summary = summarize_completed_sleep(days=days)
+    if not summary.get("available"):
+        return {
+            "available": False,
+            "message": summary.get("message", "No completed sleep records were found."),
+            "points": [],
+            "series": [],
+            "cleaned": True,
+        }
+
+    series = []
+    for metric in metrics:
+        points = []
+        for record in summary["daily"]:
+            value = record.get(metric)
+            if value is None:
+                continue
+            points.append(
+                {
+                    "time": record["date_label"],
+                    "timestamp": datetime.fromisoformat(record["updated_local"]).timestamp(),
+                    "value": value,
+                    "date": record["date"],
+                    "label": record.get("sleep_label") if metric == "minutes_asleep" else None,
+                }
+            )
+        if not points:
+            continue
+        values = [point["value"] for point in points]
+        series.append(
+            {
+                "metric": metric,
+                "sensor": SLEEP_METRIC_ENTITIES[metric],
+                "label": SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title()),
+                "unit": SLEEP_PLOT_METRIC_UNITS.get(metric, "value"),
+                "points": points,
+                "min": round(min(values), 2),
+                "max": round(max(values), 2),
+                "average": round(mean(values), 2),
+                "latest": round(values[-1], 2),
+                "samples": len(points),
+            }
+        )
+
+    if not series:
+        return {
+            "available": False,
+            "message": "No cleaned sleep points were found for the requested metrics.",
+            "points": [],
+            "series": [],
+            "cleaned": True,
+        }
+
+    primary = next((item for item in series if item["metric"] == "minutes_asleep"), series[0])
+    title = " and ".join(item["label"] for item in series)
+    return {
+        "available": True,
+        "sensor": "sleep_metrics",
+        "title": title,
+        "days": summary["days_requested"],
+        "points": primary["points"],
+        "series": series,
+        "min": primary["min"],
+        "max": primary["max"],
+        "average": primary["average"],
+        "latest": primary["latest"],
+        "samples": max(item["samples"] for item in series),
+        "cleaned": True,
+        "source": "completed_sleep",
+        "metric": "multi_sleep_metrics",
         "date_range": summary["date_range"],
     }
 
@@ -2009,6 +2238,11 @@ def build_plot_for_prompt(user_text):
     if not should_make_plot(user_text):
         return None
 
+    days = requested_days_from_text(user_text)
+    sleep_metrics = requested_sleep_plot_metrics(user_text)
+    if len(sleep_metrics) > 1:
+        return attach_python_plot(build_multi_sleep_plot(sleep_metrics, days=days))
+
     sensor = preferred_plot_sensor(user_text)
     if not sensor:
         return {
@@ -2017,7 +2251,6 @@ def build_plot_for_prompt(user_text):
             "points": [],
         }
 
-    days = requested_days_from_text(user_text)
     return attach_python_plot(query_sensor_points(sensor, days=days))
 
 
@@ -2044,15 +2277,35 @@ def plot_context(plot):
     if not plot.get("available"):
         return f"\nPlot request status: {plot.get('message', 'No plot was generated.')}\n"
 
-    summary = {
-        "sensor": plot["sensor"],
-        "days": plot["days"],
-        "samples": plot["samples"],
-        "min": plot["min"],
-        "max": plot["max"],
-        "average": plot["average"],
-        "latest": plot["latest"],
-    }
+    if plot.get("series"):
+        summary = {
+            "title": plot.get("title"),
+            "days": plot["days"],
+            "date_range": plot.get("date_range"),
+            "series": [
+                {
+                    "metric": item.get("metric"),
+                    "sensor": item.get("sensor"),
+                    "unit": item.get("unit"),
+                    "samples": item.get("samples"),
+                    "min": item.get("min"),
+                    "max": item.get("max"),
+                    "average": item.get("average"),
+                    "latest": item.get("latest"),
+                }
+                for item in plot["series"]
+            ],
+        }
+    else:
+        summary = {
+            "sensor": plot["sensor"],
+            "days": plot["days"],
+            "samples": plot["samples"],
+            "min": plot["min"],
+            "max": plot["max"],
+            "average": plot["average"],
+            "latest": plot["latest"],
+        }
     return (
         "\nThe app also generated a read-only plot for this request. "
         "Use these plot stats in your answer:\n"

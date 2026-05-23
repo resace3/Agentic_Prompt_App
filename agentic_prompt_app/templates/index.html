@@ -372,7 +372,9 @@ claude_api_key: sk-ant-...</code></pre>
 
         const title = document.createElement("div");
         title.className = "plot-title";
-        title.textContent = plot && plot.sensor
+        title.textContent = plot && plot.title
+          ? plot.title
+          : plot && plot.sensor
           ? `${plot.sensor}${plot.cleaned ? " (cleaned completed nights)" : ""}`
           : "Sensor plot";
         card.appendChild(title);
@@ -399,8 +401,18 @@ claude_api_key: sk-ant-...</code></pre>
 
           const stats = document.createElement("div");
           stats.className = "plot-stats";
-          const range = plot.date_range ? ` | ${plot.date_range}` : "";
-          stats.textContent = `${plot.samples} samples${range} | min ${plot.min} | avg ${plot.average} | max ${plot.max} | latest ${plot.latest}`;
+          if (plot.series && plot.series.length) {
+            const range = plot.date_range ? ` | ${plot.date_range}` : "";
+            const seriesStats = plot.series.map((item) => {
+              const label = item.label || item.metric || item.sensor || "Series";
+              const unit = item.unit ? ` ${item.unit}` : "";
+              return `${label}: ${item.samples} samples, min ${item.min}${unit}, avg ${item.average}${unit}, max ${item.max}${unit}, latest ${item.latest}${unit}`;
+            }).join(" | ");
+            stats.textContent = `${seriesStats}${range}`;
+          } else {
+            const range = plot.date_range ? ` | ${plot.date_range}` : "";
+            stats.textContent = `${plot.samples} samples${range} | min ${plot.min} | avg ${plot.average} | max ${plot.max} | latest ${plot.latest}`;
+          }
           card.appendChild(stats);
           return card;
         }
