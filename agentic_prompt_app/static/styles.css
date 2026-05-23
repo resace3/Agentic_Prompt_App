@@ -1307,3 +1307,113 @@ tr:last-child td {
     min-height: 44px;
   }
 }
+
+@media (max-width: 1000px) {
+  body {
+    overflow-y: auto;
+    padding-bottom: 72px;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .chat-sidebar {
+    height: auto;
+    max-height: 72px;
+    overflow: hidden;
+  }
+
+  .main-pane {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .topbar {
+    max-height: 80px;
+    overflow-y: auto;
+    padding: 8px 12px;
+  }
+
+  .topbar h1 {
+    font-size: 1rem;
+  }
+
+  .topbar p,
+  .model-price {
+    display: none;
+  }
+
+  .topbar-actions {
+    align-items: center;
+    gap: 6px;
+  }
+
+  .key-status {
+    min-height: 30px;
+    padding: 4px 8px;
+  }
+
+  .provider-picker select,
+  .model-picker select {
+    min-height: 30px;
+    padding: 4px 8px;
+  }
+
+  .main-pane > .tabs {
+    padding: 5px 12px;
+  }
+
+  .main-pane > .tabs > .tab {
+    height: 30px;
+    min-height: 30px;
+    max-height: 30px;
+  }
+
+  .tab-panel {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  #promptsPanel {
+    grid-template-rows: minmax(120px, 1fr) auto;
+    height: min(460px, calc(100dvh - 170px));
+    min-height: 180px;
+    overflow: visible;
+    padding-bottom: 64px;
+  }
+
+  .messages {
+    overflow-y: auto;
+    padding: 10px 12px;
+  }
+
+  .composer {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 1000;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: stretch;
+    gap: 8px;
+    padding: 6px 10px;
+    border-top: 1px solid var(--line-strong);
+    box-shadow: 0 -8px 20px rgba(15, 23, 42, 0.12);
+  }
+
+  #messageInput {
+    height: 44px;
+    min-height: 44px;
+    max-height: 44px;
+    resize: none;
+  }
+
+  #sendButton {
+    height: 44px;
+    min-height: 44px;
+  }
+}

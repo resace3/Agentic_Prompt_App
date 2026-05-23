@@ -191,6 +191,25 @@ def test_prompt_composer_stays_visible_in_short_and_zoom_like_viewports(page):
         assert_composer_visible(snapshot)
 
 
+def test_prompt_composer_stays_visible_with_browser_zoom(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+
+    for size, zoom in (
+        ({"width": 950, "height": 620}, 1.25),
+        ({"width": 950, "height": 620}, 1.5),
+        ({"width": 950, "height": 500}, 2),
+        ({"width": 633, "height": 413}, 2),
+        ({"width": 390, "height": 320}, 2.5),
+    ):
+        page.set_viewport_size(size)
+        page.goto(base_url, wait_until="networkidle")
+        page.evaluate("(zoom) => { document.documentElement.style.zoom = String(zoom); }", zoom)
+        snapshot = composer_layout_snapshot(page)
+        print("composer zoom layout", size, zoom, snapshot)
+        assert_composer_visible(snapshot)
+        assert snapshot["composer"]["overflow"] != "hidden", snapshot
+
+
 def test_sidebar_new_chat_button_creates_empty_chat(page):
     base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
 
