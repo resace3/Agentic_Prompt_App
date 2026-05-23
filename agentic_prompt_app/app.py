@@ -316,6 +316,7 @@ def handle_unexpected_exception(exc):
         return jsonify({"error": "Internal server error.", "status": 500}), 500
     raise exc
 
+
 SLEEP_METRIC_ENTITIES = {
     "minutes_asleep": "sensor.nick_r_sleep_minutes_asleep",
     "time_in_bed": "sensor.nick_r_sleep_time_in_bed",
