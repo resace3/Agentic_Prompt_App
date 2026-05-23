@@ -1622,9 +1622,7 @@ def render_multi_series_python_plot(plot):
         va="top",
     )
     fig.tight_layout(rect=[0, 0.1, 1, 1])
-    y_axis_label = "; ".join(
-        f"{item.get('label')} ({item.get('unit')})" for item in series if item.get("label")
-    )
+    y_axis_label = "; ".join(f"{item.get('label')} ({item.get('unit')})" for item in series if item.get("label"))
 
     return {
         "data_url": encoded_matplotlib_figure(fig),
