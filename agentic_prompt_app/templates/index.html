@@ -74,7 +74,6 @@ claude_api_key: sk-ant-...</code></pre>
         <nav class="tabs" aria-label="Main sections">
           <button class="tab active" type="button" data-tab="prompts">Prompts</button>
           <button class="tab" type="button" data-tab="sensorMaps">Sensor Maps</button>
-          <button class="tab" type="button" data-tab="sensorPlots">Sensor Plots</button>
         </nav>
 
         <section id="promptsPanel" class="tab-panel active">
@@ -119,22 +118,6 @@ claude_api_key: sk-ant-...</code></pre>
           </div>
         </section>
 
-        <section id="sensorPlotsPanel" class="tab-panel plot-tab-panel">
-          <section class="plot-panel">
-            <div class="plot-controls">
-              <label>
-                Sensor
-                <select id="plotSensorSelect"></select>
-              </label>
-              <label>
-                Days
-                <input id="plotDaysInput" type="number" min="1" max="365" value="30">
-              </label>
-              <button id="plotButton" type="button">Plot</button>
-            </div>
-            <div id="plotArea" class="plot-area">Choose a sensor to plot its numeric history.</div>
-          </section>
-        </section>
       </section>
     </main>
 
@@ -159,14 +142,9 @@ claude_api_key: sk-ant-...</code></pre>
       const addSensorRowButton = document.querySelector("#addSensorRow");
       const saveSensorMapButton = document.querySelector("#saveSensorMap");
       const sensorSaveStatus = document.querySelector("#sensorSaveStatus");
-      const plotSensorSelect = document.querySelector("#plotSensorSelect");
-      const plotDaysInput = document.querySelector("#plotDaysInput");
-      const plotButton = document.querySelector("#plotButton");
-      const plotArea = document.querySelector("#plotArea");
       const tabs = document.querySelectorAll(".tab");
       const promptsPanel = document.querySelector("#promptsPanel");
       const sensorMapsPanel = document.querySelector("#sensorMapsPanel");
-      const sensorPlotsPanel = document.querySelector("#sensorPlotsPanel");
       const chatList = document.querySelector("#chatList");
       const chatCount = document.querySelector("#chatCount");
       const newChatButton = document.querySelector("#newChatButton");
@@ -1003,23 +981,6 @@ claude_api_key: sk-ant-...</code></pre>
         sensorSaveStatus.dataset.state = state;
       }
 
-      function syncPlotSensorOptions() {
-        const current = plotSensorSelect.value;
-        plotSensorSelect.innerHTML = "";
-
-        for (const row of sensorMapRows) {
-          if (!row.sensor) continue;
-          const option = document.createElement("option");
-          option.value = row.sensor;
-          option.textContent = row.sensor;
-          plotSensorSelect.appendChild(option);
-        }
-
-        if ([...plotSensorSelect.options].some((option) => option.value === current)) {
-          plotSensorSelect.value = current;
-        }
-      }
-
       function renderSensorRows() {
         sensorRows.innerHTML = "";
 
@@ -1027,7 +988,6 @@ claude_api_key: sk-ant-...</code></pre>
           const row = document.createElement("tr");
           row.innerHTML = '<td colspan="3">No sensor map rows yet.</td>';
           sensorRows.appendChild(row);
-          syncPlotSensorOptions();
           return;
         }
 
@@ -1044,7 +1004,6 @@ claude_api_key: sk-ant-...</code></pre>
           sensorInput.addEventListener("input", () => {
             sensorMapRows[index].sensor = sensorInput.value;
             markSensorMapDirty();
-            syncPlotSensorOptions();
           });
 
           const descriptionInput = document.createElement("textarea");
@@ -1073,8 +1032,6 @@ claude_api_key: sk-ant-...</code></pre>
           row.append(sensorCell, descriptionCell, actionCell);
           sensorRows.appendChild(row);
         });
-
-        syncPlotSensorOptions();
       }
 
       function markSensorMapDirty() {
@@ -1117,43 +1074,16 @@ claude_api_key: sk-ant-...</code></pre>
         }
       }
 
-      async function plotSelectedSensor() {
-        const sensor = plotSensorSelect.value;
-        const days = plotDaysInput.value || "30";
-        if (!sensor) {
-          plotArea.textContent = "Add a sensor row before plotting.";
-          return;
-        }
-
-        plotButton.disabled = true;
-        plotArea.textContent = "Reading numeric sensor history...";
-
-        try {
-          const { response, data } = await fetchJson(`/api/sensor-plot?sensor=${encodeURIComponent(sensor)}&days=${encodeURIComponent(days)}`);
-          if (!response.ok) {
-            throw new Error(data.error || "Plot failed.");
-          }
-          plotArea.innerHTML = "";
-          plotArea.appendChild(buildPlotCard(data));
-        } catch (error) {
-          plotArea.textContent = `Error: ${error.message}`;
-        } finally {
-          plotButton.disabled = false;
-        }
-      }
-
       tabs.forEach((tab) => {
         tab.addEventListener("click", () => {
           tabs.forEach((item) => item.classList.remove("active"));
           tab.classList.add("active");
 
           const showSensorMaps = tab.dataset.tab === "sensorMaps";
-          const showSensorPlots = tab.dataset.tab === "sensorPlots";
-          promptsPanel.classList.toggle("active", !showSensorMaps && !showSensorPlots);
+          promptsPanel.classList.toggle("active", !showSensorMaps);
           sensorMapsPanel.classList.toggle("active", showSensorMaps);
-          sensorPlotsPanel.classList.toggle("active", showSensorPlots);
 
-          if (showSensorMaps || showSensorPlots) {
+          if (showSensorMaps) {
             loadSensorMap();
           }
         });
@@ -1166,7 +1096,6 @@ claude_api_key: sk-ant-...</code></pre>
       });
 
       saveSensorMapButton.addEventListener("click", saveSensorMap);
-      plotButton.addEventListener("click", plotSelectedSensor);
       keyHelpButton.addEventListener("click", () => {
         const shouldShow = keyHelpPanel.hidden;
         keyHelpPanel.hidden = !shouldShow;
