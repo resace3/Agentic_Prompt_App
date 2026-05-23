@@ -46,6 +46,82 @@ def test_key_help_and_setup_diagnostics_are_visible(page):
     assert page.locator("#setupStatusText").inner_text()
 
 
+def tab_layout_snapshot(page):
+    return page.evaluate(
+        """
+        () => {
+          const wanted = [
+            ["promptsTab", ".tab[data-tab='prompts']"],
+            ["sensorMapsTab", ".tab[data-tab='sensorMaps']"],
+            ["tabsContainer", ".tabs"],
+            ["mainPane", ".main-pane"],
+            ["promptsPanel", "#promptsPanel"],
+            ["sensorMapsPanel", "#sensorMapsPanel"],
+          ];
+          const props = [
+            "display",
+            "flex",
+            "flexGrow",
+            "alignSelf",
+            "alignItems",
+            "height",
+            "minHeight",
+            "maxHeight",
+            "gridRow",
+            "writingMode",
+          ];
+          const out = {};
+          for (const [name, selector] of wanted) {
+            const el = document.querySelector(selector);
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            out[name] = {
+              className: el.className,
+              offsetHeight: el.offsetHeight,
+              clientHeight: el.clientHeight,
+              rectHeight: rect.height,
+            };
+            for (const prop of props) {
+              out[name][prop] = style[prop];
+            }
+          }
+          return out;
+        }
+        """
+    )
+
+
+def assert_compact_tabs(snapshot):
+    for name in ("promptsTab", "sensorMapsTab"):
+        height = snapshot[name]["rectHeight"]
+        assert 25 <= height <= 45, f"{name} height {height}; snapshot={snapshot}"
+
+
+def test_tabs_stay_compact_when_switching_and_resizing(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+    page.set_viewport_size({"width": 950, "height": 620})
+    page.goto(base_url, wait_until="networkidle")
+
+    initial = tab_layout_snapshot(page)
+    print("tab layout initial", initial)
+    assert_compact_tabs(initial)
+
+    page.locator(".tab[data-tab='prompts']").click()
+    prompts = tab_layout_snapshot(page)
+    print("tab layout after prompts click", prompts)
+    assert_compact_tabs(prompts)
+
+    page.locator(".tab[data-tab='sensorMaps']").click()
+    sensor_maps = tab_layout_snapshot(page)
+    print("tab layout after sensor maps click", sensor_maps)
+    assert_compact_tabs(sensor_maps)
+
+    page.set_viewport_size({"width": 640, "height": 620})
+    resized = tab_layout_snapshot(page)
+    print("tab layout after resize", resized)
+    assert_compact_tabs(resized)
+
+
 def test_sidebar_new_chat_button_creates_empty_chat(page):
     base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
 

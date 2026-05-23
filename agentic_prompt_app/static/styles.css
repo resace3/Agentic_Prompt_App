@@ -413,29 +413,35 @@ select {
   text-transform: none;
 }
 
-.tabs {
+.main-pane > .tabs {
   display: flex;
+  flex-direction: row;
   align-items: center;
+  justify-content: flex-start;
   align-content: center;
   gap: 8px;
   flex: 0 0 auto;
+  height: auto;
+  min-height: 0;
   overflow-x: auto;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
   background: var(--panel-soft);
 }
 
-.tab {
+.main-pane > .tabs > .tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
+  flex-grow: 0;
+  flex-shrink: 0;
   align-self: center;
   width: auto;
   min-width: 112px;
-  height: 36px;
-  min-height: 36px;
-  max-height: 36px;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
   padding: 0 16px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -445,14 +451,15 @@ select {
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
+  writing-mode: horizontal-tb;
 }
 
-.tab:hover {
+.main-pane > .tabs > .tab:hover {
   background: var(--tab);
   color: var(--text);
 }
 
-.tab.active {
+.main-pane > .tabs > .tab.active {
   background: var(--accent-soft);
   border-color: #bfdbfe;
   color: var(--accent-dark);
@@ -1020,17 +1027,19 @@ tr:last-child td {
     min-width: 0;
   }
 
-  .tabs {
+  .main-pane > .tabs {
     padding-inline: 12px;
   }
 
-  .tab {
+  .main-pane > .tabs > .tab {
     flex: 0 0 auto;
+    flex-grow: 0;
+    flex-shrink: 0;
     align-self: center;
     min-width: 0;
-    height: 36px;
-    min-height: 36px;
-    max-height: 36px;
+    height: 34px;
+    min-height: 34px;
+    max-height: 34px;
   }
 
   .composer {
@@ -1055,9 +1064,9 @@ tr:last-child td {
     min-height: 44px;
   }
 
-  .tabs .tab {
-    height: 36px;
-    min-height: 36px;
-    max-height: 36px;
+  .main-pane > .tabs > .tab {
+    height: 34px;
+    min-height: 34px;
+    max-height: 34px;
   }
 }
