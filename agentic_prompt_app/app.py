@@ -2530,6 +2530,34 @@ def n_of_1_latex_equations():
     ]
 
 
+def n_of_1_computed_results(analysis):
+    rows = []
+    for predictor in (analysis or {}).get("ranked_associations") or []:
+        sensor = predictor.get("sensor")
+        for association in predictor.get("lagged_associations") or []:
+            rows.append(
+                {
+                    "sensor": sensor,
+                    "lag_days": association.get("lag_days"),
+                    "pearson_r": association.get("pearson_r"),
+                    "n": association.get("n"),
+                    "slope_minutes_asleep_per_feature_unit": association.get(
+                        "slope_minutes_asleep_per_feature_unit"
+                    ),
+                }
+            )
+    rows = sorted(rows, key=lambda row: abs(float(row.get("pearson_r") or 0)), reverse=True)
+    outcome = (analysis or {}).get("outcome") or {}
+    return {
+        "outcome_sensor": outcome.get("sensor"),
+        "outcome_metric": outcome.get("metric"),
+        "days_returned": outcome.get("days_returned"),
+        "date_range": outcome.get("date_range"),
+        "ranked_by_absolute_pearson_r": rows[:8],
+        "strongest_association": rows[0] if rows else None,
+    }
+
+
 def build_analysis_visuals(user_text, ha_summary):
     analysis = (ha_summary or {}).get("n_of_1_analysis")
     if not analysis or not analysis.get("available") or not should_build_analysis_visuals(user_text):
@@ -2545,6 +2573,7 @@ def build_analysis_visuals(user_text, ha_summary):
         "available": True,
         "title": "Generated visuals",
         "artifacts": artifacts,
+        "computed_results": n_of_1_computed_results(analysis),
         "summary": "Rendered deterministic association plot, causal DAGs, and LaTeX equations for the N-of-1 analysis.",
     }
 
@@ -3506,6 +3535,10 @@ def analysis_visuals_context(analysis_visuals):
         "effects. The LaTeX cards show the formulas used for correlation, slope, and lag "
         "alignment. Keep the text description consistent with these rendered artifacts:\n"
         f"{yaml.safe_dump(artifacts, sort_keys=False)}"
+        "Use these exact computed results as the source of truth. If naming the strongest "
+        "association, choose the first row in ranked_by_absolute_pearson_r. Do not claim a "
+        "weaker predictor is strongest:\n"
+        f"{yaml.safe_dump(analysis_visuals.get('computed_results') or {}, sort_keys=False)}"
     )
 
 
