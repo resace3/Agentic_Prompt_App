@@ -3361,28 +3361,36 @@ def message():
     provider, model = requested_provider_and_model(payload)
     model_info = compact_model_info(model)
 
-    conversation = get_conversation(payload.get("chat_id"))
-    if not conversation["messages"] and conversation.get("title") == "New chat":
-        conversation["title"] = title_from_text(user_text)
-    conversation["messages"].append({"role": "user", "content": user_text})
-    touch_conversation(conversation)
+    conversation = None
+    deterministic_possible = bool(detect_app_delete_request(user_text) or detect_sensor_map_add_request(user_text))
+    if not deterministic_possible and payload.get("chat_id"):
+        existing_conversation = get_conversation(payload.get("chat_id"), create=False)
+        pending = existing_conversation.get("pending_action") if existing_conversation else None
+        deterministic_possible = isinstance(pending, dict) and pending.get("type") == "add_sensor_map"
 
-    deterministic_assistant = handle_deterministic_message_action(conversation, user_text)
-    if deterministic_assistant is not None:
-        return jsonify(
-            message_response_payload(
-                conversation,
-                deterministic_assistant,
-                provider=provider,
-                model=model,
-                extra={
-                    "response_id": None,
-                    "home_assistant_context": None,
-                    "plot": None,
-                    "sensor_data": None,
-                },
+    if deterministic_possible:
+        conversation = get_conversation(payload.get("chat_id"))
+        if not conversation["messages"] and conversation.get("title") == "New chat":
+            conversation["title"] = title_from_text(user_text)
+        conversation["messages"].append({"role": "user", "content": user_text})
+        touch_conversation(conversation)
+
+        deterministic_assistant = handle_deterministic_message_action(conversation, user_text)
+        if deterministic_assistant is not None:
+            return jsonify(
+                message_response_payload(
+                    conversation,
+                    deterministic_assistant,
+                    provider=provider,
+                    model=model,
+                    extra={
+                        "response_id": None,
+                        "home_assistant_context": None,
+                        "plot": None,
+                        "sensor_data": None,
+                    },
+                )
             )
-        )
 
     key_status_data = provider_key_status()
     provider_status = key_status_data["providers"].get(provider["id"], {})
@@ -3399,6 +3407,13 @@ def message():
             }
         )
         return jsonify(payload), 400
+
+    if conversation is None:
+        conversation = get_conversation(payload.get("chat_id"))
+        if not conversation["messages"] and conversation.get("title") == "New chat":
+            conversation["title"] = title_from_text(user_text)
+        conversation["messages"].append({"role": "user", "content": user_text})
+        touch_conversation(conversation)
 
     plot = safe_build_plot_for_prompt(user_text)
     sensor_data = safe_build_sensor_data_for_prompt(user_text)
