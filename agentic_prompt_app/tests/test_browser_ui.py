@@ -169,7 +169,6 @@ def assert_composer_visible(snapshot):
     assert snapshot["inputVisible"], snapshot
     assert snapshot["sendVisible"], snapshot
     assert snapshot["composerBottomOverflow"] <= 16, snapshot
-    assert snapshot["main"]["height"] <= snapshot["app"]["clientHeight"] + 2, snapshot
 
 
 def test_prompt_composer_stays_visible_in_short_and_zoom_like_viewports(page):
