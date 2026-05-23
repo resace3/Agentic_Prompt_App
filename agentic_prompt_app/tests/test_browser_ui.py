@@ -134,3 +134,42 @@ def test_sidebar_new_chat_button_creates_empty_chat(page):
 
     assert page.locator(".chat-row").count() == initial_count + 1
     assert page.locator(".chat-row.active .chat-title").inner_text()
+
+
+def test_analysis_visual_artifacts_render_user_friendly_cards(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+
+    page.goto(base_url, wait_until="networkidle")
+    result = page.evaluate(
+        """
+        () => {
+          const svg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="120"><rect width="400" height="120" fill="white"/><text x="20" y="60">DAG</text></svg>');
+          const visuals = {
+            title: 'N-of-1 Analysis Visuals',
+            artifacts: [
+              {type: 'plot', title: 'Association Plot', description: 'Readable plot', data_url: 'data:image/png;base64,iVBORw0KGgo='},
+              {type: 'dag', title: 'Same-Day DAG', description: 'Readable DAG', data_url: `data:image/svg+xml;base64,${svg}`},
+              {type: 'latex', title: 'Pearson correlation', description: 'Rendered equation', latex: 'r = \\\\frac{\\\\sum (X_i-\\\\bar X)(Y_i-\\\\bar Y)}{...}'}
+            ]
+          };
+          const card = buildAnalysisVisualsCard(visuals);
+          document.querySelector('#messages').appendChild(card);
+          const plot = document.querySelector('.analysis-plot-image');
+          const dag = document.querySelector('.dag-image');
+          const latex = document.querySelector('.latex-equation');
+          return {
+            title: document.querySelector('.analysis-visuals-title').textContent,
+            plotVisible: !!plot && plot.getBoundingClientRect().width > 100,
+            dagVisible: !!dag && dag.getBoundingClientRect().width > 100,
+            latexText: latex ? latex.textContent : '',
+            artifactCount: document.querySelectorAll('.analysis-artifact').length,
+          };
+        }
+        """
+    )
+
+    assert result["title"] == "N-of-1 Analysis Visuals"
+    assert result["artifactCount"] == 3
+    assert result["plotVisible"] is True
+    assert result["dagVisible"] is True
+    assert "\\frac" in result["latexText"]

@@ -562,6 +562,8 @@ claude_api_key: sk-ant-...</code></pre>
 
       function renderInlineMarkdown(value) {
         return escapeHtml(value)
+          .replace(/\$\$([^$]+)\$\$/g, '<span class="math-inline">$1</span>')
+          .replace(/\$([^$]+)\$/g, '<span class="math-inline">$1</span>')
           .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
           .replace(/\*(.+?)\*/g, "<em>$1</em>")
           .replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -616,6 +618,9 @@ claude_api_key: sk-ant-...</code></pre>
         const lines = String(markdown || "").split(/\r?\n/);
         const html = [];
         let inList = false;
+        let inFence = false;
+        let fenceLanguage = "";
+        let fenceLines = [];
 
         function closeList() {
           if (inList) {
@@ -627,6 +632,28 @@ claude_api_key: sk-ant-...</code></pre>
         for (let index = 0; index < lines.length; index += 1) {
           const line = lines[index];
           const trimmed = line.trim();
+          const fence = trimmed.match(/^```([A-Za-z0-9_-]*)\s*$/);
+          if (fence) {
+            closeList();
+            if (!inFence) {
+              inFence = true;
+              fenceLanguage = (fence[1] || "").toLowerCase();
+              fenceLines = [];
+            } else {
+              const code = escapeHtml(fenceLines.join("\n"));
+              const languageClass = fenceLanguage ? ` language-${fenceLanguage}` : "";
+              const title = fenceLanguage === "latex" || fenceLanguage === "tex" ? "LaTeX equation" : "Code";
+              html.push(`<figure class="code-block${languageClass}"><figcaption>${title}</figcaption><pre><code>${code}</code></pre></figure>`);
+              inFence = false;
+              fenceLanguage = "";
+              fenceLines = [];
+            }
+            continue;
+          }
+          if (inFence) {
+            fenceLines.push(line);
+            continue;
+          }
           if (!trimmed) {
             closeList();
             continue;
@@ -667,7 +694,54 @@ claude_api_key: sk-ant-...</code></pre>
         }
 
         closeList();
+        if (inFence) {
+          const code = escapeHtml(fenceLines.join("\n"));
+          html.push(`<figure class="code-block"><figcaption>Code</figcaption><pre><code>${code}</code></pre></figure>`);
+        }
         return html.join("");
+      }
+
+      function buildAnalysisVisualsCard(visuals) {
+        const wrap = document.createElement("section");
+        wrap.className = "analysis-visuals";
+        const title = document.createElement("div");
+        title.className = "analysis-visuals-title";
+        title.textContent = visuals && visuals.title ? visuals.title : "Analysis visuals";
+        wrap.appendChild(title);
+
+        for (const artifact of (visuals && visuals.artifacts) || []) {
+          const card = document.createElement("article");
+          card.className = `analysis-artifact ${artifact.type || "artifact"}`;
+
+          const artifactTitle = document.createElement("div");
+          artifactTitle.className = "analysis-artifact-title";
+          artifactTitle.textContent = artifact.title || "Analysis artifact";
+          card.appendChild(artifactTitle);
+
+          if (artifact.description) {
+            const description = document.createElement("p");
+            description.className = "analysis-artifact-description";
+            description.textContent = artifact.description;
+            card.appendChild(description);
+          }
+
+          if ((artifact.type === "plot" || artifact.type === "dag") && artifact.data_url) {
+            const image = document.createElement("img");
+            image.className = artifact.type === "dag" ? "dag-image" : "analysis-plot-image";
+            image.src = artifact.data_url;
+            image.alt = artifact.title || artifact.type;
+            card.appendChild(image);
+          } else if (artifact.type === "latex") {
+            const equation = document.createElement("div");
+            equation.className = "latex-equation";
+            equation.textContent = artifact.latex || "";
+            card.appendChild(equation);
+          }
+
+          wrap.appendChild(card);
+        }
+
+        return wrap;
       }
 
       function messageElement(message, options = {}) {
@@ -709,6 +783,9 @@ claude_api_key: sk-ant-...</code></pre>
         }
         if (message.sensor_data) {
           bubble.appendChild(buildSensorDataCard(message.sensor_data));
+        }
+        if (message.analysis_visuals) {
+          bubble.appendChild(buildAnalysisVisualsCard(message.analysis_visuals));
         }
         return bubble;
       }

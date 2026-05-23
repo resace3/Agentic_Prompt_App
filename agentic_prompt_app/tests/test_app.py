@@ -222,7 +222,8 @@ class PromptAppTests(unittest.TestCase):
                     "message": (
                         "do a correlation and N of 1 Inference using the methods in this paper "
                         "for my time asleep sleep with other variables in the sensor map:"
-                        "https://arxiv.org/abs/2407.17666"
+                        "https://arxiv.org/abs/2407.17666 and make plots describing the analysis, "
+                        "show causal DAGs, and show the LaTeX equations"
                     ),
                     "provider": "openai",
                     "model": "gpt-4.1-nano",
@@ -412,7 +413,8 @@ class PromptAppTests(unittest.TestCase):
                     "message": (
                         "do a correlation and N of 1 Inference using the methods in this paper "
                         "for my time asleep sleep with other variables in the sensor map:"
-                        "https://arxiv.org/abs/2407.17666"
+                        "https://arxiv.org/abs/2407.17666 and make plots describing the analysis, "
+                        "show causal DAGs, and show the LaTeX equations"
                     ),
                     "provider": "openai",
                     "model": "gpt-4.1-nano",
@@ -432,6 +434,18 @@ class PromptAppTests(unittest.TestCase):
         first_lag = analysis["ranked_associations"][0]["lagged_associations"][0]
         self.assertGreaterEqual(first_lag["n"], 7)
         self.assertGreater(first_lag["pearson_r"], 0.9)
+        visuals = data["analysis_visuals"]
+        self.assertTrue(visuals["available"])
+        artifact_types = [artifact["type"] for artifact in visuals["artifacts"]]
+        self.assertIn("plot", artifact_types)
+        self.assertGreaterEqual(artifact_types.count("dag"), 2)
+        self.assertGreaterEqual(artifact_types.count("latex"), 3)
+        plot_artifact = next(artifact for artifact in visuals["artifacts"] if artifact["type"] == "plot")
+        dag_artifact = next(artifact for artifact in visuals["artifacts"] if artifact["type"] == "dag")
+        latex_artifact = next(artifact for artifact in visuals["artifacts"] if artifact["type"] == "latex")
+        self.assertTrue(plot_artifact["data_url"].startswith("data:image/png;base64,"))
+        self.assertTrue(dag_artifact["data_url"].startswith("data:image/svg+xml;base64,"))
+        self.assertIn("\\frac", latex_artifact["latex"])
 
     def test_sleep_entity_discovery_excludes_scenes_from_sensor_map(self):
         original_request = app_module.home_assistant_api_request
@@ -1400,6 +1414,55 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn('"klass":"python-plot-image"', result.stdout)
         self.assertIn("Rendered with Python (matplotlib)", result.stdout)
         self.assertIn("Y: Sleep Time (minutes)", result.stdout)
+
+    def test_analysis_visuals_renderer_outputs_plot_dag_and_latex_cards(self):
+        template = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        start = template.index("function buildAnalysisVisualsCard")
+        end = template.index("function messageElement")
+        renderer_source = template[start:end]
+        script = (
+            "class Node {"
+            "constructor(name){this.name=name;this.children=[];this.attrs={};this.textContent='';"
+            "this.className='';this.src='';this.alt='';}"
+            "appendChild(node){this.children.push(node);return node;}"
+            "append(...nodes){this.children.push(...nodes);}"
+            "setAttribute(key,value){this.attrs[key]=String(value);}"
+            "}"
+            "const document={createElement:(name)=>new Node(name),createElementNS:(_ns,name)=>new Node(name)};"
+            + renderer_source
+            + """
+            const visuals={
+              title:'N-of-1 Analysis Visuals',
+              artifacts:[
+                {type:'plot',title:'Association Plot',description:'Associations',data_url:'data:image/png;base64,plot'},
+                {type:'dag',title:'Same-Day DAG',description:'DAG',data_url:'data:image/svg+xml;base64,dag'},
+                {type:'latex',title:'Pearson correlation',description:'Equation',latex:'r = \\\\frac{a}{b}'}
+              ]
+            };
+            const card=buildAnalysisVisualsCard(visuals);
+            function collect(node,out={images:[],text:[],classes:[]}) {
+              if (node.name === 'img') out.images.push({src:node.src, alt:node.alt, klass:node.className});
+              if (node.textContent) out.text.push(node.textContent);
+              if (node.className) out.classes.push(node.className);
+              for (const child of node.children || []) collect(child,out);
+              return out;
+            }
+            process.stdout.write(JSON.stringify(collect(card)));
+            """
+        )
+
+        result = subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertIn("analysis-plot-image", result.stdout)
+        self.assertIn("dag-image", result.stdout)
+        self.assertIn("latex-equation", result.stdout)
+        self.assertIn("data:image/svg+xml;base64,dag", result.stdout)
+        self.assertIn("\\\\frac", result.stdout)
 
 
 if __name__ == "__main__":

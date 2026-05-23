@@ -26,6 +26,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from statistics import mean
 from zoneinfo import ZoneInfo
+from xml.sax.saxutils import escape as xml_escape
 
 import yaml
 from flask import Flask, jsonify, render_template, request, session
@@ -374,6 +375,18 @@ N_OF_1_REQUEST_TERMS = (
     "g-formula",
     "g formula",
     "paper",
+)
+ANALYSIS_VISUAL_REQUEST_TERMS = (
+    "causal dag",
+    "causal dags",
+    "dag",
+    "dags",
+    "latex",
+    "equation",
+    "equations",
+    "analysis plot",
+    "analysis plots",
+    "plots describing",
 )
 ACTIVE_STATES = {"on", "open", "opened", "detected", "active", "home", "true"}
 MAX_CONTEXT_SENSORS = 6
@@ -1029,7 +1042,7 @@ def sensor_map_path():
 
 def should_include_home_assistant_context(user_text):
     lowered = user_text.lower()
-    return any(term in lowered for term in HA_REQUEST_TERMS)
+    return any(term in lowered for term in HA_REQUEST_TERMS) or should_build_analysis_visuals(user_text)
 
 
 def should_search_sensor_catalog(user_text):
@@ -1067,6 +1080,13 @@ def sensor_catalog_search_terms(user_text):
 def should_make_plot(user_text):
     lowered = user_text.lower()
     return any(term in lowered for term in PLOT_REQUEST_TERMS)
+
+
+def should_build_analysis_visuals(user_text):
+    lowered = user_text.lower()
+    return any(term in lowered for term in ANALYSIS_VISUAL_REQUEST_TERMS) or (
+        "plot" in lowered and "analysis" in lowered
+    )
 
 
 def detect_plot_type(user_text):
@@ -2268,6 +2288,267 @@ def attach_python_plot(plot):
     return plot
 
 
+def encoded_svg_image(svg):
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def render_n_of_1_association_plot(analysis):
+    ranked = analysis.get("ranked_associations") or []
+    rows = []
+    for predictor in ranked[:6]:
+        sensor = predictor.get("sensor") or "unknown"
+        label = sensor.replace("binary_sensor.", "").replace("sensor.", "").replace("_", " ")
+        for association in predictor.get("lagged_associations", []):
+            rows.append(
+                {
+                    "label": f"{label} (lag {association.get('lag_days')})",
+                    "r": float(association.get("pearson_r") or 0),
+                    "n": association.get("n"),
+                    "slope": association.get("slope_minutes_asleep_per_feature_unit"),
+                }
+            )
+    rows = sorted(rows, key=lambda item: abs(item["r"]), reverse=True)[:8]
+    if not rows:
+        return None
+
+    fig, ax = plt.subplots(figsize=(10.8, 5.8), dpi=150)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+    labels = [row["label"] for row in rows][::-1]
+    values = [row["r"] for row in rows][::-1]
+    colors = ["#2563eb" if value >= 0 else "#dc2626" for value in values]
+    ax.barh(labels, values, color=colors, alpha=0.86)
+    ax.axvline(0, color="#334155", linewidth=1.2)
+    ax.set_xlim(-1, 1)
+    ax.set_xlabel("Pearson r", fontsize=11, fontweight="bold", color="#334155")
+    ax.set_title("N-of-1 Associations With Minutes Asleep", loc="left", fontsize=16, fontweight="bold", pad=16)
+    ax.grid(True, axis="x", color="#e2e8f0", linewidth=0.9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cbd5e1")
+    ax.spines["bottom"].set_color("#cbd5e1")
+    ax.tick_params(axis="x", colors="#475569", labelsize=9)
+    ax.tick_params(axis="y", colors="#334155", labelsize=9)
+    for index, row in enumerate(rows[::-1]):
+        value = row["r"]
+        x_offset = 0.025 if value >= 0 else -0.025
+        ha = "left" if value >= 0 else "right"
+        ax.text(
+            value + x_offset,
+            index,
+            f"r={value:.3f}, N={row['n']}, slope={row['slope']}",
+            va="center",
+            ha=ha,
+            fontsize=8.2,
+            color="#111827",
+        )
+    outcome = analysis.get("outcome") or {}
+    footer = (
+        f"Outcome: {outcome.get('metric', 'minutes_asleep')} | "
+        f"{outcome.get('days_returned')} nights | {outcome.get('date_range')} | observational screening"
+    )
+    ax.text(0, -0.18, footer, transform=ax.transAxes, fontsize=9, color="#64748b", va="top")
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    return {
+        "type": "plot",
+        "title": "N-of-1 Association Plot",
+        "description": "Ranked same-day and prior-day associations with completed minutes asleep.",
+        "data_url": encoded_matplotlib_figure(fig),
+        "format": "png",
+        "renderer": "matplotlib",
+    }
+
+
+def causal_dag_svg(title, nodes, edges):
+    width = 920
+    height = 430
+    node_width = 210
+    node_height = 62
+    node_lookup = {node["id"]: node for node in nodes}
+
+    defs = """
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+      </marker>
+      <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+        <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/>
+      </filter>
+    </defs>
+    """
+    edge_parts = []
+    for edge in edges:
+        start = node_lookup[edge["from"]]
+        end = node_lookup[edge["to"]]
+        x1 = start["x"] + node_width
+        y1 = start["y"] + node_height / 2
+        x2 = end["x"]
+        y2 = end["y"] + node_height / 2
+        if start["x"] > end["x"]:
+            x1 = start["x"]
+            x2 = end["x"] + node_width
+        mid = (x1 + x2) / 2
+        path = f"M{x1},{y1} C{mid},{y1} {mid},{y2} {x2},{y2}"
+        label = edge.get("label")
+        edge_parts.append(
+            f'<path d="{path}" fill="none" stroke="#334155" stroke-width="2.2" marker-end="url(#arrow)"/>'
+        )
+        if label:
+            edge_parts.append(
+                f'<text x="{mid}" y="{(y1 + y2) / 2 - 8}" text-anchor="middle" font-size="13" '
+                f'font-weight="700" fill="#475569">{xml_escape(label)}</text>'
+            )
+
+    node_parts = []
+    for node in nodes:
+        fill = node.get("fill", "#eff6ff")
+        stroke = node.get("stroke", "#2563eb")
+        node_parts.append(
+            f'<rect x="{node["x"]}" y="{node["y"]}" width="{node_width}" height="{node_height}" '
+            f'rx="12" fill="{fill}" stroke="{stroke}" stroke-width="2" filter="url(#shadow)"/>'
+        )
+        label = xml_escape(node["label"])
+        words = label.split()
+        lines = []
+        current = ""
+        for word in words:
+            next_line = f"{current} {word}".strip()
+            if len(next_line) > 24 and current:
+                lines.append(current)
+                current = word
+            else:
+                current = next_line
+        if current:
+            lines.append(current)
+        start_y = node["y"] + 27 - (len(lines) - 1) * 8
+        for line_index, line in enumerate(lines[:3]):
+            node_parts.append(
+                f'<text x="{node["x"] + node_width / 2}" y="{start_y + line_index * 17}" '
+                f'text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">{xml_escape(line)}</text>'
+            )
+
+    svg = f"""
+    <svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{xml_escape(title)}">
+      {defs}
+      <rect width="{width}" height="{height}" fill="#ffffff"/>
+      <text x="28" y="36" font-size="22" font-weight="800" fill="#111827">{xml_escape(title)}</text>
+      <text x="28" y="62" font-size="13" fill="#64748b">Conceptual DAG for observational N-of-1 screening; unmeasured confounding is shown explicitly.</text>
+      {"".join(edge_parts)}
+      {"".join(node_parts)}
+    </svg>
+    """
+    return {
+        "type": "dag",
+        "title": title,
+        "description": "Causal assumptions diagram, not proof of causal effect.",
+        "data_url": encoded_svg_image(svg),
+        "format": "svg",
+        "renderer": "svg",
+    }
+
+
+def build_n_of_1_dags(analysis):
+    ranked = analysis.get("ranked_associations") or []
+    top_sensor = ranked[0].get("sensor") if ranked else "Selected Sensor Map Predictor"
+    top_label = top_sensor.replace("binary_sensor.", "").replace("sensor.", "").replace("_", " ").title()
+    outcome = "Minutes Asleep (day t)"
+    return [
+        causal_dag_svg(
+            "Same-Day Association DAG",
+            [
+                {
+                    "id": "conf",
+                    "label": "Unmeasured context: stress, illness, schedule",
+                    "x": 355,
+                    "y": 92,
+                    "fill": "#fff7ed",
+                    "stroke": "#ea580c",
+                },
+                {"id": "x", "label": f"{top_label} (day t)", "x": 92, "y": 228, "fill": "#eff6ff", "stroke": "#2563eb"},
+                {"id": "y", "label": outcome, "x": 618, "y": 228, "fill": "#ecfdf5", "stroke": "#059669"},
+            ],
+            [
+                {"from": "x", "to": "y", "label": "estimated r/slope"},
+                {"from": "conf", "to": "x", "label": "may affect"},
+                {"from": "conf", "to": "y", "label": "may affect"},
+            ],
+        ),
+        causal_dag_svg(
+            "Lagged N-of-1 DAG",
+            [
+                {
+                    "id": "conf",
+                    "label": "Prior context and routines",
+                    "x": 355,
+                    "y": 92,
+                    "fill": "#fff7ed",
+                    "stroke": "#ea580c",
+                },
+                {
+                    "id": "x",
+                    "label": f"{top_label} (day t-1)",
+                    "x": 92,
+                    "y": 228,
+                    "fill": "#eff6ff",
+                    "stroke": "#2563eb",
+                },
+                {"id": "y", "label": outcome, "x": 618, "y": 228, "fill": "#ecfdf5", "stroke": "#059669"},
+            ],
+            [
+                {"from": "x", "to": "y", "label": "prior-day association"},
+                {"from": "conf", "to": "x", "label": "history"},
+                {"from": "conf", "to": "y", "label": "history"},
+            ],
+        ),
+    ]
+
+
+def n_of_1_latex_equations():
+    return [
+        {
+            "title": "Pearson correlation",
+            "latex": (
+                r"r = \frac{\sum_{i=1}^{N}(X_i-\bar{X})(Y_i-\bar{Y})}"
+                r"{\sqrt{\sum_{i=1}^{N}(X_i-\bar{X})^2}\sqrt{\sum_{i=1}^{N}(Y_i-\bar{Y})^2}}"
+            ),
+            "description": "Within-person association between a daily predictor and completed minutes asleep.",
+        },
+        {
+            "title": "Linear slope",
+            "latex": (
+                r"\hat{\beta} = \frac{\sum_{i=1}^{N}(X_i-\bar{X})(Y_i-\bar{Y})}"
+                r"{\sum_{i=1}^{N}(X_i-\bar{X})^2}"
+            ),
+            "description": "Estimated minutes asleep per one-unit increase in the predictor.",
+        },
+        {
+            "title": "Lagged exposure alignment",
+            "latex": r"Y_t = \alpha + \beta X_{t-k} + \epsilon_t,\quad k \in \{0,1\}",
+            "description": "Same-day uses k=0; prior-day uses k=1.",
+        },
+    ]
+
+
+def build_analysis_visuals(user_text, ha_summary):
+    analysis = (ha_summary or {}).get("n_of_1_analysis")
+    if not analysis or not analysis.get("available") or not should_build_analysis_visuals(user_text):
+        return None
+
+    artifacts = []
+    plot = render_n_of_1_association_plot(analysis)
+    if plot:
+        artifacts.append(plot)
+    artifacts.extend(build_n_of_1_dags(analysis))
+    artifacts.extend({"type": "latex", **equation} for equation in n_of_1_latex_equations())
+    return {
+        "available": True,
+        "title": "N-of-1 Analysis Visuals",
+        "artifacts": artifacts,
+        "summary": "Rendered deterministic association plot, causal DAGs, and LaTeX equations for the N-of-1 analysis.",
+    }
+
+
 def query_cleaned_sleep_points(entity_id, days=30, plot_type="line"):
     metric = sleep_metric_for_entity(entity_id)
     if not metric:
@@ -2788,8 +3069,9 @@ def should_build_n_of_1_analysis(user_text):
     lowered = user_text.lower()
     relation_requested = any(term in lowered for term in RELATION_REQUEST_TERMS)
     n_of_1_requested = any(term in lowered for term in N_OF_1_REQUEST_TERMS)
+    visual_requested = should_build_analysis_visuals(user_text)
     mentions_sleep = any(term in lowered for term in ("sleep", "asleep", "time asleep", "minutes asleep"))
-    return mentions_sleep and (relation_requested or n_of_1_requested)
+    return (mentions_sleep and (relation_requested or n_of_1_requested)) or visual_requested
 
 
 def is_sleep_related_sensor(entity_id):
@@ -3199,6 +3481,17 @@ def plot_context(plot):
         "\nThe app also generated a read-only plot for this request. "
         "Use these plot stats in your answer:\n"
         f"{yaml.safe_dump(summary, sort_keys=False)}"
+    )
+
+
+def analysis_visuals_context(analysis_visuals):
+    if not analysis_visuals:
+        return ""
+    return (
+        "\nThe app rendered visual artifacts for this response: an N-of-1 association plot, "
+        "causal DAG SVG diagrams, and LaTeX equation cards. Do not describe non-existent "
+        "attachments or ask the user to use a notebook. Refer to the rendered cards below "
+        "the message and summarize what each visual shows.\n"
     )
 
 
@@ -3957,6 +4250,7 @@ def message():
                         "home_assistant_context": None,
                         "plot": None,
                         "sensor_data": None,
+                        "analysis_visuals": None,
                     },
                 )
             )
@@ -3987,7 +4281,12 @@ def message():
     plot = safe_build_plot_for_prompt(user_text)
     sensor_data = safe_build_sensor_data_for_prompt(user_text)
     model_input, ha_summary = build_model_input(user_text)
-    model_input = f"{model_input}{plot_context(plot)}{sensor_data_context(sensor_data)}"
+    analysis_visuals = build_analysis_visuals(user_text, ha_summary)
+    model_input = (
+        f"{model_input}{plot_context(plot)}"
+        f"{analysis_visuals_context(analysis_visuals)}"
+        f"{sensor_data_context(sensor_data)}"
+    )
 
     try:
         response = provider_response(provider, model, model_input, conversation)
@@ -4014,6 +4313,8 @@ def message():
         assistant_message["plot"] = plot
     if sensor_data:
         assistant_message["sensor_data"] = sensor_data
+    if analysis_visuals:
+        assistant_message["analysis_visuals"] = analysis_visuals
     conversation["messages"].append(assistant_message)
     touch_conversation(conversation)
     save_chat_store()
@@ -4033,6 +4334,7 @@ def message():
             "home_assistant_context": ha_summary,
             "plot": plot,
             "sensor_data": sensor_data,
+            "analysis_visuals": analysis_visuals,
         }
     )
 

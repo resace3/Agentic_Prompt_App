@@ -593,7 +593,7 @@ jobs:
                   ['sensor.nutribullet_plug_current'],
               ),
               (
-                  'do a correlation and N of 1 Inference using the methods in this paper for my time asleep sleep with other variables in the sensor map:https://arxiv.org/abs/2407.17666',
+                  'do a correlation and N of 1 Inference using the methods in this paper for my time asleep sleep with other variables in the sensor map:https://arxiv.org/abs/2407.17666 and make plots describing the analysis, show causal DAGs, and show the LaTeX equations',
                   [],
               ),
               (
@@ -615,6 +615,15 @@ jobs:
                   ranked_sensors = {row.get('sensor') for row in ranked}
                   assert_ok('sensor.nick_r_steps' in ranked_sensors, analysis)
                   assert_ok(all((assoc.get('n') or 0) >= 3 for row in ranked for assoc in row.get('lagged_associations', [])), analysis)
+                  visuals = data.get('analysis_visuals') or {}
+                  artifacts = visuals.get('artifacts') or []
+                  artifact_types = [artifact.get('type') for artifact in artifacts]
+                  assert_ok(visuals.get('available'), visuals)
+                  assert_ok('plot' in artifact_types, visuals)
+                  assert_ok(artifact_types.count('dag') >= 2, visuals)
+                  assert_ok(artifact_types.count('latex') >= 3, visuals)
+                  assert_ok(any(str(artifact.get('data_url', '')).startswith('data:image/svg+xml;base64,') for artifact in artifacts), visuals)
+                  assert_ok(any('\\frac' in str(artifact.get('latex', '')) for artifact in artifacts), visuals)
 
           assert_ok(gpt_call_count == 4, f'Expected exactly 4 GPT calls, got {gpt_call_count}')
 
