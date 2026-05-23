@@ -1483,7 +1483,6 @@ def describe_sensor(entity_id):
 
 
 def describe_sensor_map_candidate(entity_id):
-    name = entity_id.split(".", 1)[-1].replace("_", " ")
     if "step" in entity_id.lower():
         return "Step count sensor."
     return describe_sensor(entity_id)
