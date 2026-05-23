@@ -42,9 +42,11 @@ select {
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: min(1320px, calc(100% - 28px));
   height: calc(100vh - 28px);
-  min-height: 620px;
+  height: calc(100dvh - 28px);
+  min-height: min(620px, calc(100dvh - 28px));
   margin: 0 auto;
   margin-top: 14px;
   background: var(--panel);
@@ -58,6 +60,8 @@ select {
   display: grid;
   grid-template-rows: auto 1fr;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   border-right: 1px solid var(--line);
   background: #f8fafc;
 }
@@ -206,6 +210,7 @@ select {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -412,8 +417,9 @@ select {
 
 .tab-panel {
   display: none;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .tab-panel.active {
@@ -1112,9 +1118,10 @@ tr:last-child td {
 @media (max-width: 640px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     width: 100%;
     height: 100vh;
+    height: 100dvh;
     min-height: 0;
     margin-top: 0;
     border: 0;
@@ -1122,7 +1129,9 @@ tr:last-child td {
   }
 
   .chat-sidebar {
-    max-height: 190px;
+    height: auto;
+    max-height: 120px;
+    overflow: hidden;
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
@@ -1145,6 +1154,8 @@ tr:last-child td {
     display: grid;
     grid-template-columns: 1fr;
     align-items: start;
+    max-height: 180px;
+    overflow-y: auto;
     padding: 14px 12px;
   }
 
@@ -1206,5 +1217,83 @@ tr:last-child td {
     height: 34px;
     min-height: 34px;
     max-height: 34px;
+  }
+}
+
+@media (max-height: 560px) {
+  .app-shell {
+    min-height: min(620px, calc(100dvh - 28px));
+  }
+
+  .chat-sidebar {
+    max-height: 72px;
+    overflow: hidden;
+  }
+
+  .sidebar-header {
+    padding: 8px 12px;
+  }
+
+  .chat-list {
+    padding: 6px 12px;
+  }
+
+  .topbar {
+    max-height: 96px;
+    overflow-y: auto;
+    padding: 8px 12px;
+  }
+
+  .topbar h1 {
+    font-size: 1rem;
+  }
+
+  .topbar p,
+  .model-price {
+    display: none;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .key-status {
+    min-height: 30px;
+    padding: 4px 8px;
+  }
+
+  .provider-picker select,
+  .model-picker select {
+    min-height: 30px;
+    padding: 4px 8px;
+  }
+
+  .main-pane > .tabs {
+    padding: 6px 12px;
+  }
+
+  .main-pane > .tabs > .tab {
+    height: 32px;
+    min-height: 32px;
+    max-height: 32px;
+  }
+
+  .messages {
+    padding: 8px 12px;
+  }
+
+  .composer {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  textarea {
+    min-height: 44px;
+    max-height: 72px;
+    padding: 8px;
+  }
+
+  button {
+    min-height: 36px;
   }
 }

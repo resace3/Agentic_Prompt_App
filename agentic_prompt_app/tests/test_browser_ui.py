@@ -124,6 +124,70 @@ def test_tabs_stay_compact_when_switching_and_resizing(page):
     assert_compact_tabs(resized)
 
 
+def composer_layout_snapshot(page):
+    return page.evaluate(
+        """
+        () => {
+          const selectors = {
+            app: ".app-shell",
+            sidebar: ".chat-sidebar",
+            main: ".main-pane",
+            topbar: ".topbar",
+            tabs: ".tabs",
+            panel: "#promptsPanel",
+            messages: "#messages",
+            composer: "#promptForm",
+            input: "#messageInput",
+            send: "#sendButton",
+          };
+          const out = { viewport: { width: innerWidth, height: innerHeight } };
+          for (const [name, selector] of Object.entries(selectors)) {
+            const el = document.querySelector(selector);
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            out[name] = {
+              top: rect.top,
+              bottom: rect.bottom,
+              height: rect.height,
+              width: rect.width,
+              clientHeight: el.clientHeight,
+              scrollHeight: el.scrollHeight,
+              overflow: style.overflow,
+              minHeight: style.minHeight,
+            };
+          }
+          out.inputVisible = out.input.top >= 0 && out.input.bottom <= innerHeight;
+          out.sendVisible = out.send.top >= 0 && out.send.bottom <= innerHeight;
+          out.composerBottomOverflow = out.composer.bottom - innerHeight;
+          return out;
+        }
+        """
+    )
+
+
+def assert_composer_visible(snapshot):
+    assert snapshot["inputVisible"], snapshot
+    assert snapshot["sendVisible"], snapshot
+    assert snapshot["composerBottomOverflow"] <= 16, snapshot
+    assert snapshot["main"]["height"] <= snapshot["app"]["clientHeight"] + 2, snapshot
+
+
+def test_prompt_composer_stays_visible_in_short_and_zoom_like_viewports(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+
+    for size in (
+        {"width": 950, "height": 620},
+        {"width": 950, "height": 413},
+        {"width": 633, "height": 413},
+        {"width": 390, "height": 460},
+    ):
+        page.set_viewport_size(size)
+        page.goto(base_url, wait_until="networkidle")
+        snapshot = composer_layout_snapshot(page)
+        print("composer layout", size, snapshot)
+        assert_composer_visible(snapshot)
+
+
 def test_sidebar_new_chat_button_creates_empty_chat(page):
     base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
 
