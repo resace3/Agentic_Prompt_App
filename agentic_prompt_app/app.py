@@ -1270,7 +1270,11 @@ def history_window(days):
 
 
 def recorder_db_path():
-    for path in RECORDER_DB_PATHS:
+    candidate_paths = (
+        os.environ.get("HA_RECORDER_DB_PATH"),
+        *RECORDER_DB_PATHS,
+    )
+    for path in candidate_paths:
         if path and os.path.exists(path):
             return path
     return None
