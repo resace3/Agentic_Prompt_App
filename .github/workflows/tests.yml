@@ -353,6 +353,12 @@ jobs:
                   """
               )
               fake_entities = {
+                  "sensor.nick_r_sleep_minutes_asleep": (390, 405, 420, 435, 450, 465, 480, 495),
+                  "sensor.nick_r_sleep_time_in_bed": (430, 445, 460, 475, 490, 505, 520, 535),
+                  "sensor.nick_r_sleep_minutes_awake": (40, 40, 40, 40, 40, 40, 40, 40),
+                  "sensor.nick_r_sleep_efficiency": (91, 91, 91, 92, 92, 92, 92, 93),
+                  "sensor.nick_r_awakenings_count": (3, 3, 2, 2, 2, 1, 1, 1),
+                  "sensor.nick_r_sleep_start_time": ("23:15", "23:10", "23:05", "23:00", "22:55", "22:50", "22:45", "22:40"),
                   "sensor.nick_r_steps": (4200, 5100, 6300, 5800, 7100, 6900, 7500),
                   "sensor.jelly_star_daily_steps": (2300, 3400, 4100, 3900, 4500, 5200, 6100),
                   "sensor.nutribullet_plug_current": (0, 0, 1.2, 3.4, 0.5, 0, 0),
@@ -587,7 +593,7 @@ jobs:
                   ['sensor.nutribullet_plug_current'],
               ),
               (
-                  'In one short sentence, describe what the fake pantry door sensor tracks.',
+                  'do a correlation and N of 1 Inference using the methods in this paper for my time asleep sleep with other variables in the sensor map:https://arxiv.org/abs/2407.17666',
                   [],
               ),
               (
@@ -601,6 +607,14 @@ jobs:
               matches = {row.get('entity_id') for row in catalog.get('matches', [])}
               for entity_id in expected_entities:
                   assert_ok(entity_id in matches, {'expected': entity_id, 'matches': sorted(matches), 'prompt': prompt})
+              if 'arxiv.org' in prompt:
+                  context = data.get('home_assistant_context') or {}
+                  analysis = context.get('n_of_1_analysis') or {}
+                  assert_ok(analysis.get('available'), analysis)
+                  ranked = analysis.get('ranked_associations') or []
+                  ranked_sensors = {row.get('sensor') for row in ranked}
+                  assert_ok('sensor.nick_r_steps' in ranked_sensors, analysis)
+                  assert_ok(all((assoc.get('n') or 0) >= 3 for row in ranked for assoc in row.get('lagged_associations', [])), analysis)
 
           assert_ok(gpt_call_count == 4, f'Expected exactly 4 GPT calls, got {gpt_call_count}')
 

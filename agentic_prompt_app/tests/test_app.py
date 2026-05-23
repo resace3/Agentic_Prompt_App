@@ -199,6 +199,42 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(sensors[0]["sensor"], "sensor.nick_r_steps")
         self.assertIn("Step count", sensors[0]["description"])
 
+    def test_arxiv_sensor_map_analysis_prompt_is_not_add_request(self):
+        self.client.put("/api/sensor-map", json={"sensors": []})
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                prompt = kwargs["input"]
+                assert "arxiv.org" in prompt
+                assert "sensor_catalog_search:" in prompt
+                assert "add_sensor_map" not in prompt
+                return SimpleNamespace(id="resp_test", output_text="I will use the provided analysis context.")
+
+        class FakeClient:
+            responses = FakeResponses()
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FakeClient()
+        try:
+            response = self.client.post(
+                "/api/message",
+                json={
+                    "message": (
+                        "do a correlation and N of 1 Inference using the methods in this paper "
+                        "for my time asleep sleep with other variables in the sensor map:"
+                        "https://arxiv.org/abs/2407.17666"
+                    ),
+                    "provider": "openai",
+                    "model": "gpt-4.1-nano",
+                },
+            )
+        finally:
+            app_module.get_client = original_get_client
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(data["messages"][-1].get("sensor_map_action"))
+
     def test_app_delete_prompt_requires_manual_home_assistant_action(self):
         class FailingResponses:
             def create(self, **kwargs):
@@ -310,6 +346,84 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         matches = data["home_assistant_context"]["sensor_catalog_search"]["matches"]
         self.assertEqual(matches[0]["entity_id"], "sensor.nutribullet_plug_current")
+
+    def test_n_of_1_sleep_analysis_uses_recorder_db_and_sensor_map(self):
+        self.write_fake_recorder_db(
+            {
+                "sensor.nick_r_sleep_minutes_asleep": [390, 405, 420, 435, 450, 465, 480, 495],
+                "sensor.nick_r_sleep_time_in_bed": [430, 445, 460, 475, 490, 505, 520, 535],
+                "sensor.nick_r_sleep_minutes_awake": [40, 40, 40, 40, 40, 40, 40, 40],
+                "sensor.nick_r_sleep_efficiency": [91, 91, 91, 92, 92, 92, 92, 93],
+                "sensor.nick_r_awakenings_count": [3, 3, 2, 2, 2, 1, 1, 1],
+                "sensor.nick_r_sleep_start_time": [
+                    "23:15",
+                    "23:10",
+                    "23:05",
+                    "23:00",
+                    "22:55",
+                    "22:50",
+                    "22:45",
+                    "22:40",
+                ],
+                "sensor.nick_r_steps": [3000, 3500, 4200, 4900, 5600, 6300, 7000, 7700],
+                "sensor.nutribullet_plug_current": [0, 0, 1.2, 0, 1.5, 0, 0.8, 0],
+            }
+        )
+        self.client.put(
+            "/api/sensor-map",
+            json={
+                "sensors": [
+                    {"sensor": "sensor.nick_r_steps", "description": "Daily steps"},
+                    {"sensor": "sensor.nutribullet_plug_current", "description": "NutriBullet plug current amps"},
+                ]
+            },
+        )
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                prompt = kwargs["input"]
+                assert "n_of_1_analysis:" in prompt
+                assert "sensor.nick_r_steps" in prompt
+                assert "pearson_r" in prompt
+                assert "https://arxiv.org/abs/2407.17666" in prompt
+                return SimpleNamespace(
+                    id="resp_test",
+                    output_text=(
+                        "The strongest deterministic association is steps with minutes asleep; "
+                        "this is observational N-of-1 screening, not causal proof."
+                    ),
+                )
+
+        class FakeClient:
+            responses = FakeResponses()
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FakeClient()
+        try:
+            response = self.client.post(
+                "/api/message",
+                json={
+                    "message": (
+                        "do a correlation and N of 1 Inference using the methods in this paper "
+                        "for my time asleep sleep with other variables in the sensor map:"
+                        "https://arxiv.org/abs/2407.17666"
+                    ),
+                    "provider": "openai",
+                    "model": "gpt-4.1-nano",
+                },
+            )
+        finally:
+            app_module.get_client = original_get_client
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        analysis = data["home_assistant_context"]["n_of_1_analysis"]
+        self.assertTrue(analysis["available"])
+        self.assertEqual(analysis["outcome"]["metric"], "minutes_asleep")
+        self.assertEqual(analysis["ranked_associations"][0]["sensor"], "sensor.nick_r_steps")
+        first_lag = analysis["ranked_associations"][0]["lagged_associations"][0]
+        self.assertGreaterEqual(first_lag["n"], 7)
+        self.assertGreater(first_lag["pearson_r"], 0.9)
 
     def test_sleep_entity_discovery_excludes_scenes_from_sensor_map(self):
         original_request = app_module.home_assistant_api_request

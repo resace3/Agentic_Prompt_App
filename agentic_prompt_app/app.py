@@ -15,6 +15,7 @@ import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from math import sqrt
 from pathlib import Path
 
 import matplotlib
@@ -321,7 +322,7 @@ PLOT_TYPE_ALIASES = {
     "line": ("line plot", "line chart", "line graph", "trend line"),
 }
 ENTITY_ID_PATTERN = re.compile(r"\b[a-zA-Z_]+\.[a-zA-Z0-9_]+\b")
-SENSOR_MAP_ADD_TERMS = ("add", "include", "put", "save", "map")
+SENSOR_MAP_ADD_TERMS = ("add", "include", "put", "save")
 CONFIRM_TERMS = ("yes", "yeah", "yep", "sure", "confirm", "add it", "please do", "go ahead")
 DENY_TERMS = ("no", "nope", "cancel", "don't", "do not", "never mind", "nevermind")
 MAX_CONTEXT_SLEEP_DAYS = 365
@@ -362,6 +363,17 @@ RELATION_REQUEST_TERMS = (
     "compare",
     "versus",
     " vs ",
+)
+N_OF_1_REQUEST_TERMS = (
+    "n of 1",
+    "n=1",
+    "n-of-1",
+    "within-person",
+    "within person",
+    "causal inference",
+    "g-formula",
+    "g formula",
+    "paper",
 )
 ACTIVE_STATES = {"on", "open", "opened", "detected", "active", "home", "true"}
 MAX_CONTEXT_SENSORS = 6
@@ -1778,7 +1790,18 @@ def home_assistant_sensor_map():
             "sensors": [],
         }
 
-    entities = discover_sleep_entities()
+    try:
+        entities = discover_sleep_entities()
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "home_assistant_api",
+            "api_url": home_assistant_api_url(),
+            "read_only": True,
+            "storage_path": sensor_map_path(),
+            "sensors": [],
+            "message": f"Could not discover Home Assistant sensors: {exc}",
+        }
 
     return {
         "available": True,
@@ -1888,6 +1911,23 @@ def extract_entity_ids(user_text):
     return [normalize_entity_id(match.group(0)) for match in ENTITY_ID_PATTERN.finditer(user_text)]
 
 
+def is_sensor_map_entity_candidate(entity_id):
+    domain = normalize_entity_id(entity_id).split(".", 1)[0]
+    return domain in {
+        "sensor",
+        "binary_sensor",
+        "light",
+        "switch",
+        "device_tracker",
+        "person",
+        "input_boolean",
+        "input_number",
+        "number",
+        "counter",
+        "button",
+    }
+
+
 def text_confirms(text):
     lowered = text.lower()
     return any(term in lowered for term in CONFIRM_TERMS)
@@ -1905,7 +1945,7 @@ def detect_sensor_map_add_request(user_text):
     if not any(term in lowered for term in SENSOR_MAP_ADD_TERMS):
         return None
 
-    entity_ids = extract_entity_ids(user_text)
+    entity_ids = [entity_id for entity_id in extract_entity_ids(user_text) if is_sensor_map_entity_candidate(entity_id)]
     if not entity_ids:
         return None
 
@@ -2744,6 +2784,255 @@ def summarize_mapped_sensor_histories(user_text, days, completed_sleep=None):
     return [summarize_mapped_sensor_history(row, days=days, completed_sleep=completed_sleep) for row in rows]
 
 
+def should_build_n_of_1_analysis(user_text):
+    lowered = user_text.lower()
+    relation_requested = any(term in lowered for term in RELATION_REQUEST_TERMS)
+    n_of_1_requested = any(term in lowered for term in N_OF_1_REQUEST_TERMS)
+    mentions_sleep = any(term in lowered for term in ("sleep", "asleep", "time asleep", "minutes asleep"))
+    return mentions_sleep and (relation_requested or n_of_1_requested)
+
+
+def pearson_correlation(x_values, y_values):
+    pairs = [(float(x), float(y)) for x, y in zip(x_values, y_values) if x is not None and y is not None]
+    if len(pairs) < 3:
+        return None
+    x_mean = mean(x for x, _ in pairs)
+    y_mean = mean(y for _, y in pairs)
+    x_diffs = [x - x_mean for x, _ in pairs]
+    y_diffs = [y - y_mean for _, y in pairs]
+    x_var = sum(value * value for value in x_diffs)
+    y_var = sum(value * value for value in y_diffs)
+    if x_var <= 0 or y_var <= 0:
+        return None
+    return sum(x_diff * y_diff for x_diff, y_diff in zip(x_diffs, y_diffs)) / sqrt(x_var * y_var)
+
+
+def linear_slope(x_values, y_values):
+    pairs = [(float(x), float(y)) for x, y in zip(x_values, y_values) if x is not None and y is not None]
+    if len(pairs) < 2:
+        return None
+    x_mean = mean(x for x, _ in pairs)
+    y_mean = mean(y for _, y in pairs)
+    denominator = sum((x - x_mean) ** 2 for x, _ in pairs)
+    if denominator <= 0:
+        return None
+    return sum((x - x_mean) * (y - y_mean) for x, y in pairs) / denominator
+
+
+def sensor_daily_feature(row, days):
+    sensor = row.get("sensor")
+    result = {
+        "sensor": sensor,
+        "description": row.get("description", ""),
+        "available": False,
+        "feature": None,
+        "daily": {},
+        "samples": 0,
+    }
+    if not sensor:
+        result["message"] = "Sensor map row has no entity ID."
+        return result
+    if sensor in SLEEP_METRIC_ENTITIES.values():
+        result["message"] = "Sleep outcome sensors are excluded as predictors."
+        return result
+
+    try:
+        rows = query_entity_history_rows(sensor, days=days, limit=MAX_CONTEXT_SENSOR_ROWS)
+    except Exception as exc:
+        result["message"] = f"Could not read sensor history: {exc}"
+        return result
+
+    grouped = defaultdict(lambda: {"numeric": [], "active_events": 0, "states": Counter()})
+    for history_row in rows:
+        date = local_datetime(history_row["updated_ts"]).date().isoformat()
+        state = str(history_row.get("state", ""))
+        number = parse_number(state)
+        if number is not None:
+            grouped[date]["numeric"].append(number)
+        else:
+            grouped[date]["states"][state] += 1
+        if state.lower() in ACTIVE_STATES:
+            grouped[date]["active_events"] += 1
+
+    daily = {}
+    numeric_day_count = 0
+    for date, values in grouped.items():
+        if values["numeric"]:
+            numeric_day_count += 1
+            daily[date] = round(mean(values["numeric"]), 4)
+        else:
+            daily[date] = values["active_events"]
+
+    if not daily:
+        result["message"] = "No usable numeric or active-state history was found."
+        return result
+
+    result.update(
+        {
+            "available": True,
+            "feature": "daily_mean" if numeric_day_count else "daily_active_event_count",
+            "daily": daily,
+            "samples": len(daily),
+            "date_range": f"{min(daily)} to {max(daily)}",
+        }
+    )
+    return result
+
+
+def paired_sleep_feature_values(sleep_by_date, feature_by_date, lag_days=0):
+    pairs = []
+    for date, sleep_value in sleep_by_date.items():
+        feature_date = (datetime.fromisoformat(date).date() - timedelta(days=lag_days)).isoformat()
+        feature_value = feature_by_date.get(feature_date)
+        if feature_value is None:
+            continue
+        pairs.append(
+            {
+                "date": date,
+                "feature_date": feature_date,
+                "x": float(feature_value),
+                "y": float(sleep_value),
+            }
+        )
+    return pairs
+
+
+def correlation_summary_for_pairs(pairs):
+    if len(pairs) < 3:
+        return None
+    x_values = [pair["x"] for pair in pairs]
+    y_values = [pair["y"] for pair in pairs]
+    correlation = pearson_correlation(x_values, y_values)
+    slope = linear_slope(x_values, y_values)
+    if correlation is None or slope is None:
+        return None
+    return {
+        "n": len(pairs),
+        "pearson_r": round(correlation, 3),
+        "slope_minutes_asleep_per_feature_unit": round(slope, 3),
+        "x_min": round(min(x_values), 3),
+        "x_max": round(max(x_values), 3),
+        "y_min": round(min(y_values), 3),
+        "y_max": round(max(y_values), 3),
+        "paired_dates": [pair["date"] for pair in pairs],
+    }
+
+
+def build_n_of_1_sleep_analysis(user_text, days, completed_sleep=None):
+    if not should_build_n_of_1_analysis(user_text):
+        return None
+
+    completed_sleep = completed_sleep or summarize_completed_sleep(days=days)
+    if not completed_sleep or not completed_sleep.get("available"):
+        return {
+            "available": False,
+            "message": "No completed sleep records were available for N-of-1 analysis.",
+            "method": "Requires completed daily sleep records and at least one non-sleep Sensor Maps predictor.",
+        }
+
+    mapped_rows = [row for row in load_sensor_map()["sensors"] if row.get("sensor")]
+    predictor_rows = [row for row in mapped_rows if row.get("sensor") not in SLEEP_METRIC_ENTITIES.values()]
+    sleep_by_date = {
+        record["date"]: float(record["minutes_asleep"])
+        for record in completed_sleep.get("daily", [])
+        if record.get("minutes_asleep") is not None
+    }
+
+    predictors = []
+    for row in predictor_rows[:MAX_CONTEXT_SENSORS]:
+        feature = sensor_daily_feature(row, days=days)
+        predictor = {
+            "sensor": row.get("sensor"),
+            "description": row.get("description", ""),
+            "feature": feature.get("feature"),
+            "available": feature.get("available"),
+            "samples": feature.get("samples", 0),
+            "message": feature.get("message"),
+        }
+        if feature.get("available"):
+            lag_summaries = []
+            for lag_days in (0, 1):
+                pairs = paired_sleep_feature_values(sleep_by_date, feature["daily"], lag_days=lag_days)
+                summary = correlation_summary_for_pairs(pairs)
+                if summary:
+                    summary["lag_days"] = lag_days
+                    summary["interpretation"] = (
+                        "same-day association"
+                        if lag_days == 0
+                        else "prior-day exposure association with next sleep outcome"
+                    )
+                    lag_summaries.append(summary)
+            predictor["lagged_associations"] = lag_summaries
+            predictor["daily_feature_values"] = [
+                {"date": date, "value": feature["daily"][date]} for date in sorted(feature["daily"])[-14:]
+            ]
+        predictors.append(predictor)
+
+    usable = [item for item in predictors if item.get("lagged_associations")]
+    for item in usable:
+        item["max_abs_r"] = max(abs(summary["pearson_r"]) for summary in item["lagged_associations"])
+    usable.sort(key=lambda item: (-item["max_abs_r"], item["sensor"]))
+
+    outcome_values = list(sleep_by_date.values())
+    outcome_lag_pairs = [(outcome_values[index - 1], outcome_values[index]) for index in range(1, len(outcome_values))]
+    autocorrelation = (
+        pearson_correlation(
+            [pair[0] for pair in outcome_lag_pairs],
+            [pair[1] for pair in outcome_lag_pairs],
+        )
+        if len(outcome_lag_pairs) >= 3
+        else None
+    )
+
+    return {
+        "available": bool(usable),
+        "paper_reference": {
+            "url": "https://arxiv.org/abs/2407.17666",
+            "title": "Causal estimands and identification of time-varying effects in non-stationary time series from N-of-1 mobile device data",
+        },
+        "method": (
+            "Deterministic N-of-1 screening: align one person's daily completed minutes_asleep "
+            "with Sensor Maps predictors, compute same-day and prior-day Pearson correlations, "
+            "linear slopes, sample sizes, outcome autocorrelation, and positivity/range diagnostics. "
+            "This is an observational approximation inspired by the paper's time-varying exposure, "
+            "lagged-history, and positivity concepts; it is not a full state-space g-formula causal estimate."
+        ),
+        "outcome": {
+            "sensor": SLEEP_METRIC_ENTITIES["minutes_asleep"],
+            "metric": "minutes_asleep",
+            "days_requested": days,
+            "days_returned": len(sleep_by_date),
+            "date_range": completed_sleep.get("date_range"),
+            "mean": round(mean(outcome_values), 2) if outcome_values else None,
+            "lag1_autocorrelation": round(autocorrelation, 3) if autocorrelation is not None else None,
+        },
+        "predictors_tested": predictors,
+        "ranked_associations": usable[:8],
+        "positivity_diagnostics": [
+            {
+                "sensor": item["sensor"],
+                "feature": item.get("feature"),
+                "n_feature_days": item.get("samples"),
+                "status": "ok" if item.get("samples", 0) >= 5 else "limited",
+            }
+            for item in predictors
+        ],
+        "query": {
+            "source": recorder_query_info(
+                [SLEEP_METRIC_ENTITIES["minutes_asleep"], *[row.get("sensor") for row in predictor_rows]],
+                days,
+                limit=MAX_CONTEXT_SENSOR_ROWS,
+            ),
+            "sleep_source": completed_sleep.get("query"),
+        },
+        "message": (
+            "Use ranked_associations and report N, r, lag, slope, and caution about observational N-of-1 inference."
+            if usable
+            else "No Sensor Maps predictors had enough overlapping daily data for correlation."
+        ),
+    }
+
+
 def score_sensor_for_prompt(row, user_text):
     lowered = user_text.lower()
     sensor = row.get("sensor", "")
@@ -2933,6 +3222,8 @@ def summarize_home_assistant_prompt_context(user_text, days):
     mapped_rows = relevant_sensor_map_rows(user_text)
     sensor_catalog = discover_sensor_catalog(user_text)
     include_sleep = should_include_sleep_context(user_text, mapped_rows)
+    include_n_of_1 = should_build_n_of_1_analysis(user_text)
+    include_sleep = include_sleep or include_n_of_1
     completed_sleep = summarize_completed_sleep(days=days) if include_sleep else None
     mapped_history_rows = mapped_rows
     if include_sleep:
@@ -2957,6 +3248,7 @@ def summarize_home_assistant_prompt_context(user_text, days):
         if include_mapped_history
         else []
     )
+    n_of_1_analysis = build_n_of_1_sleep_analysis(user_text, days=days, completed_sleep=completed_sleep)
 
     return {
         "available": home_assistant_available(),
@@ -2969,10 +3261,15 @@ def summarize_home_assistant_prompt_context(user_text, days):
         "sensor_catalog_search": sensor_catalog,
         "completed_sleep": completed_sleep,
         "mapped_sensor_history": mapped_sensor_history,
+        "n_of_1_analysis": n_of_1_analysis,
         "guidance": (
             "If sensor_catalog_search.searched is true, use its matches to answer "
             "questions about whether the user has a sensor, even when that sensor is "
             "not in Sensor Maps yet. Mention exact entity_id values from the matches. "
+            "If n_of_1_analysis is present, use ranked_associations for any correlation "
+            "or N-of-1 inference answer; report N, lag, Pearson r, slope, date range, "
+            "and the observational limitation. Do not invent causal claims beyond this "
+            "deterministic analysis. "
             "Use mapped_sensor_history for any Sensor Maps entity mentioned by the user, "
             "including non-sleep entities such as doors, lights, motion, plugs, or other "
             "Home Assistant sensors. For sleep questions, use completed_sleep as the "
