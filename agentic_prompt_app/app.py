@@ -581,8 +581,7 @@ def requested_provider_and_model(payload):
         matching_other_provider = next((item for item in model_catalog() if item["id"] == model_id), None)
         if matching_other_provider:
             message = (
-                f"Model {model_id} belongs to {matching_other_provider['provider_label']}, "
-                f"not {provider['label']}."
+                f"Model {model_id} belongs to {matching_other_provider['provider_label']}, not {provider['label']}."
             )
             error_type = "provider_model_mismatch"
         else:
