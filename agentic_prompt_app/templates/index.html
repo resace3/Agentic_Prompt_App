@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Prompt Flow</title>
     {% set styles_url = url_for('static', filename='styles.css') %}
+    {% set app_js_url = url_for('static', filename='app.js') %}
     <link rel="stylesheet" href="{{ styles_url if request.script_root else styles_url.lstrip('/') }}">
+    <script defer src="{{ app_js_url if request.script_root else app_js_url.lstrip('/') }}"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -58,6 +60,15 @@
 claude_api_key: sk-ant-...</code></pre>
             <p>OpenAI enables OpenAI models. Claude enables Anthropic Claude models.</p>
           </div>
+        </section>
+
+        <section id="setupPanel" class="setup-panel" data-state="warning">
+          <div>
+            <strong>Setup diagnostics</strong>
+            <p id="setupStatusText">Checking static assets, API responses, Home Assistant access, and API key setup...</p>
+          </div>
+          <button id="setupToggleButton" type="button" aria-expanded="false">Details</button>
+          <div id="setupDetails" class="setup-details" hidden></div>
         </section>
 
         <nav class="tabs" aria-label="Main sections">
@@ -137,6 +148,10 @@ claude_api_key: sk-ant-...</code></pre>
       const keyStatusText = document.querySelector("#keyStatusText");
       const keyHelpButton = document.querySelector("#keyHelpButton");
       const keyHelpPanel = document.querySelector("#keyHelpPanel");
+      const setupPanel = document.querySelector("#setupPanel");
+      const setupStatusText = document.querySelector("#setupStatusText");
+      const setupToggleButton = document.querySelector("#setupToggleButton");
+      const setupDetails = document.querySelector("#setupDetails");
       const providerSelect = document.querySelector("#providerSelect");
       const modelSelect = document.querySelector("#modelSelect");
       const modelPrice = document.querySelector("#modelPrice");
@@ -171,6 +186,7 @@ claude_api_key: sk-ant-...</code></pre>
       let typingTimer = null;
       let saveTimer = null;
       let loadingStageTimer = null;
+      let requestInFlight = false;
 
       const REQUEST_SCRIPT_ROOT = {{ request.script_root | tojson }};
 
@@ -188,9 +204,29 @@ claude_api_key: sk-ant-...</code></pre>
         return new URL(cleanPath, `${window.location.origin}${basePath}`).toString();
       }
 
+      function redactForLog(value) {
+        return String(value || "")
+          .replace(/sk-ant-[A-Za-z0-9_-]+/g, "sk-ant-...")
+          .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-...");
+      }
+
+      function errorMessageFromData(data, fallback) {
+        if (!data) return fallback;
+        const message = data.message || data.error || fallback;
+        const fixSteps = Array.isArray(data.fix_steps) && data.fix_steps.length
+          ? ` Fix: ${data.fix_steps.join(" ")}`
+          : "";
+        return `${message}${fixSteps}`;
+      }
+
       async function fetchJson(path, options = {}) {
         const url = appUrl(path);
-        const response = await fetch(url, options);
+        let response;
+        try {
+          response = await fetch(url, options);
+        } catch (error) {
+          throw new Error(`Network failure calling ${path}: ${error.message}`);
+        }
         const contentType = response.headers.get("content-type") || "";
         const rawText = await response.text();
         console.log("Fetch response", {
@@ -198,20 +234,82 @@ claude_api_key: sk-ant-...</code></pre>
           url,
           status: response.status,
           contentType,
-          rawText,
+          rawText: redactForLog(rawText).slice(0, 600),
         });
 
         let data = {};
         if (rawText.trim()) {
+          if (!contentType.toLowerCase().includes("application/json")) {
+            throw new Error(
+              `Expected JSON from ${path}, got ${contentType || "unknown content type"} with status ${response.status}. ${redactForLog(rawText).slice(0, 240)}`
+            );
+          }
           try {
             data = JSON.parse(rawText);
           } catch (error) {
             throw new Error(
-              `Expected JSON from ${path}, got ${contentType || "unknown content type"}: ${rawText.slice(0, 240)}`
+              `Could not parse JSON from ${path}. Status ${response.status}; content-type ${contentType || "unknown"}. ${redactForLog(rawText).slice(0, 240)}`
             );
           }
+        } else if (!response.ok) {
+          throw new Error(`Empty response body from ${path} with status ${response.status}.`);
         }
         return { response, data };
+      }
+
+      function renderSetupDiagnostics(data) {
+        const checks = data && Array.isArray(data.checks) ? data.checks : [];
+        const failed = checks.filter((check) => !check.ok && !["not_required", "observed"].includes(check.status));
+        setupPanel.dataset.state = failed.length ? "warning" : "ready";
+        setupStatusText.textContent = data && data.message
+          ? data.message
+          : "Diagnostics unavailable.";
+        setupDetails.innerHTML = "";
+        for (const check of checks) {
+          const item = document.createElement("div");
+          item.className = "setup-check";
+          item.dataset.state = check.ok ? "ready" : check.status;
+          const title = document.createElement("strong");
+          title.textContent = `${check.name}: ${check.status}`;
+          const message = document.createElement("p");
+          message.textContent = check.message || "";
+          item.append(title, message);
+          if (Array.isArray(check.fix_steps) && check.fix_steps.length) {
+            const list = document.createElement("ul");
+            for (const step of check.fix_steps) {
+              const li = document.createElement("li");
+              li.textContent = step;
+              list.appendChild(li);
+            }
+            item.appendChild(list);
+          }
+          setupDetails.appendChild(item);
+        }
+      }
+
+      async function refreshDiagnostics() {
+        const cssLoaded = getComputedStyle(document.documentElement)
+          .getPropertyValue("--prompt-flow-css-loaded")
+          .trim() === "yes";
+        const jsAssetLoaded = Boolean(window.PROMPT_FLOW_STATIC_JS_LOADED);
+        if (!cssLoaded || !jsAssetLoaded) {
+          setupPanel.dataset.state = "warning";
+          setupStatusText.textContent = "Static assets may not have loaded correctly. Check CSS and JS diagnostics below.";
+        }
+        try {
+          const { response, data } = await fetchJson("/api/diagnostics");
+          if (!response.ok) {
+            throw new Error(errorMessageFromData(data, "Diagnostics failed."));
+          }
+          renderSetupDiagnostics(data);
+          if (!cssLoaded || !jsAssetLoaded) {
+            setupPanel.dataset.state = "warning";
+            setupStatusText.textContent = "The backend can see static assets, but this browser did not confirm CSS or JS startup.";
+          }
+        } catch (error) {
+          setupPanel.dataset.state = "warning";
+          setupStatusText.textContent = `Diagnostics unavailable: ${error.message}`;
+        }
       }
 
       function providerKeyLabel(providerId) {
@@ -232,6 +330,8 @@ claude_api_key: sk-ant-...</code></pre>
           state = selectedProviderStatus.configured ? "partial-ready" : "partial-missing";
         }
         keyStatusEl.dataset.state = state;
+        const canSend = Boolean(selectedProviderStatus.configured) && !requestInFlight;
+        sendButton.disabled = !canSend;
         sendButton.title = selectedProviderStatus.configured
           ? ""
           : `Add a ${providerKeyLabel(selectedProvider().id)} API key before sending.`;
@@ -1083,19 +1183,43 @@ claude_api_key: sk-ant-...</code></pre>
         renderKeyStatus();
       });
       modelSelect.addEventListener("change", updateModelPrice);
+      setupToggleButton.addEventListener("click", () => {
+        const shouldShow = setupDetails.hidden;
+        setupDetails.hidden = !shouldShow;
+        setupToggleButton.setAttribute("aria-expanded", String(shouldShow));
+      });
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const message = input.value.trim();
         if (!message) return;
+        if (requestInFlight) return;
 
+        const provider = selectedProvider();
+        const model = selectedModel();
+        const selectedProviderStatus = keyStatus && keyStatus.providers ? keyStatus.providers[provider.id] : {};
+        if (!selectedProviderStatus || !selectedProviderStatus.configured) {
+          appendMessage({
+            role: "assistant",
+            content: `Error: Add a ${provider.label} API key in /config/secrets.yaml before sending.\n\nopenai_api_key: sk-...\nclaude_api_key: sk-ant-...`,
+            provider: provider.id,
+            provider_label: provider.label,
+            model: model.id,
+            model_label: model.label,
+            model_pricing: model,
+          }, { enter: true });
+          renderKeyStatus();
+          return;
+        }
+
+        requestInFlight = true;
         sendButton.disabled = true;
         input.disabled = true;
+        providerSelect.disabled = true;
+        modelSelect.disabled = true;
         input.value = "";
 
         appendMessage({ role: "user", content: message }, { enter: true });
-        const provider = selectedProvider();
-        const model = selectedModel();
         const loadingBubble = appendMessage(
           {
             role: "assistant",
@@ -1118,7 +1242,7 @@ claude_api_key: sk-ant-...</code></pre>
           });
 
           if (!response.ok) {
-            throw new Error(data.error || "Request failed.");
+            throw new Error(errorMessageFromData(data, "Request failed."));
           }
 
           clearInterval(loadingStageTimer);
@@ -1141,8 +1265,12 @@ claude_api_key: sk-ant-...</code></pre>
             model_pricing: model,
           };
         } finally {
+          requestInFlight = false;
           sendButton.disabled = false;
           input.disabled = false;
+          providerSelect.disabled = false;
+          modelSelect.disabled = false;
+          renderKeyStatus();
           input.focus();
         }
       });
@@ -1158,6 +1286,7 @@ claude_api_key: sk-ant-...</code></pre>
 
       renderKeyStatus();
       refreshKeyStatus();
+      refreshDiagnostics();
       loadMessages();
     </script>
   </body>

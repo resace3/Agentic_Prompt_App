@@ -1,0 +1,1 @@
+window.PROMPT_FLOW_STATIC_JS_LOADED = true;

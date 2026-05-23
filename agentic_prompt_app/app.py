@@ -2,6 +2,7 @@ import base64
 import copy
 import io
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -32,6 +33,7 @@ from werkzeug.exceptions import HTTPException
 
 DEFAULT_PROVIDER = "openai"
 DEFAULT_MODEL = "gpt-4.1-nano"
+MAX_PROMPT_CHARS = 20000
 SECRET_PROVIDERS = {
     "openai": {
         "label": "OpenAI",
@@ -295,6 +297,42 @@ home_assistant_config_cache = {"expires": 0, "data": None}
 home_assistant_history_cache = {}
 
 
+class ApiError(Exception):
+    def __init__(self, message, status=400, error_type="bad_request", fix_steps=None, details_safe=None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.error_type = error_type
+        self.fix_steps = fix_steps or []
+        self.details_safe = details_safe or {}
+
+
+class ProviderApiError(ApiError):
+    pass
+
+
+def api_error_payload(message, error_type="error", fix_steps=None, details_safe=None):
+    return {
+        "ok": False,
+        "error": message,
+        "error_type": error_type,
+        "message": message,
+        "fix_steps": fix_steps or [],
+        "details_safe": details_safe or {},
+    }
+
+
+def api_error_response(message, status=400, error_type="bad_request", fix_steps=None, details_safe=None):
+    return jsonify(api_error_payload(message, error_type, fix_steps, details_safe)), status
+
+
+def api_success(payload=None):
+    data = {"ok": True}
+    if payload:
+        data.update(payload)
+    return data
+
+
 @app.before_request
 def log_static_requests():
     if request.path.startswith("/static/"):
@@ -317,15 +355,36 @@ def force_api_json_headers(response):
 @app.errorhandler(HTTPException)
 def handle_http_exception(exc):
     if request.path.startswith("/api/"):
-        return jsonify({"error": exc.description, "status": exc.code}), exc.code
+        return api_error_response(
+            exc.description,
+            status=exc.code,
+            error_type=f"http_{exc.code}",
+            details_safe={"status": exc.code},
+        )
     return exc
+
+
+@app.errorhandler(ApiError)
+def handle_api_error(exc):
+    return api_error_response(
+        exc.message,
+        status=exc.status,
+        error_type=exc.error_type,
+        fix_steps=exc.fix_steps,
+        details_safe=exc.details_safe,
+    )
 
 
 @app.errorhandler(Exception)
 def handle_unexpected_exception(exc):
     if request.path.startswith("/api/"):
         app.logger.exception("Unhandled API error")
-        return jsonify({"error": "Internal server error.", "status": 500}), 500
+        return api_error_response(
+            "Internal server error.",
+            status=500,
+            error_type="internal_error",
+            fix_steps=["Check the add-on logs for the traceback."],
+        )
     raise exc
 
 
@@ -348,17 +407,20 @@ def secret_candidate_paths():
 
 def configured_secret_source(secret_name, env_names):
     for env_name in env_names:
-        if os.environ.get(env_name):
+        if os.environ.get(env_name, "").strip():
             return "environment"
 
     for path in [p for p in secret_candidate_paths() if p]:
         if not os.path.exists(path):
             continue
 
-        with open(path, "r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except (OSError, yaml.YAMLError):
+            continue
 
-        api_key = data.get(secret_name)
+        api_key = str(data.get(secret_name) or "").strip()
         if api_key:
             return "secrets.yaml"
     return None
@@ -366,19 +428,23 @@ def configured_secret_source(secret_name, env_names):
 
 def load_secret_value(secret_name, env_names, provider_label):
     for env_name in env_names:
-        if os.environ.get(env_name):
-            return os.environ[env_name]
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
 
     for path in [p for p in secret_candidate_paths() if p]:
         if not os.path.exists(path):
             continue
 
-        with open(path, "r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except (OSError, yaml.YAMLError):
+            continue
 
-        api_key = data.get(secret_name)
+        api_key = str(data.get(secret_name) or "").strip()
         if api_key:
-            return str(api_key).strip()
+            return api_key
 
     env_label = " or ".join(env_names)
     raise RuntimeError(
@@ -406,10 +472,16 @@ def provider_key_status():
         providers[provider_id] = {
             "label": config["label"],
             "configured": configured,
+            "state": "configured_unverified" if configured else "missing",
             "source": source,
             "secret_name": config["secret_name"],
             "env_name": config["env_names"][0],
             "env_names": config["env_names"],
+            "fix_steps": [
+                "Open /config/secrets.yaml in Home Assistant.",
+                f"Add {config['secret_name']}: sk-...",
+                "Restart the Agentic Prompt App add-on.",
+            ],
         }
         if configured:
             configured_labels.append(config["label"])
@@ -436,6 +508,16 @@ def provider_key_status():
             "note": "Add only the providers you plan to use, then restart the add-on.",
         },
     }
+
+
+def secret_setup_fix_steps(provider_label=None):
+    target = f" for {provider_label}" if provider_label else ""
+    return [
+        f"Add an API key{target} in /config/secrets.yaml.",
+        "Use: openai_api_key: sk-...",
+        "Use: claude_api_key: sk-ant-...",
+        "Restart the Agentic Prompt App add-on.",
+    ]
 
 
 def get_client():
@@ -486,12 +568,37 @@ def requested_provider_and_model(payload):
     provider_id = (payload.get("provider") or DEFAULT_PROVIDER).strip()
     provider = provider_by_id(provider_id)
     if not provider:
-        raise ValueError(f"Unknown provider: {provider_id}")
+        raise ApiError(
+            f"Unknown provider: {provider_id}",
+            status=400,
+            error_type="unknown_provider",
+            details_safe={"supported_providers": [item["id"] for item in provider_catalog()]},
+        )
 
     model_id = (payload.get("model") or provider["default_model"]).strip()
     model = model_by_id(provider["id"], model_id)
     if not model:
-        raise ValueError(f"Unknown {provider['label']} model: {model_id}")
+        matching_other_provider = next((item for item in model_catalog() if item["id"] == model_id), None)
+        if matching_other_provider:
+            message = (
+                f"Model {model_id} belongs to {matching_other_provider['provider_label']}, "
+                f"not {provider['label']}."
+            )
+            error_type = "provider_model_mismatch"
+        else:
+            message = f"Unknown {provider['label']} model: {model_id}"
+            error_type = "unknown_model"
+        raise ApiError(
+            message,
+            status=400,
+            error_type=error_type,
+            fix_steps=[f"Choose a supported {provider['label']} model from the model selector."],
+            details_safe={
+                "provider": provider["id"],
+                "requested_model": model_id,
+                "supported_models": [item["id"] for item in provider_models(provider["id"])],
+            },
+        )
     return provider, model
 
 
@@ -560,6 +667,183 @@ def home_assistant_available():
         return True
     except Exception:
         return False
+
+
+def check_item(name, ok, status, message, fix_steps=None, safe_details=None):
+    return {
+        "name": name,
+        "ok": bool(ok),
+        "status": status,
+        "message": message,
+        "fix_steps": fix_steps or [],
+        "safe_details": safe_details or {},
+    }
+
+
+def read_addon_config():
+    path = BASE_DIR / "config.yaml"
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    except Exception as exc:
+        return {"_error": str(exc)}
+
+
+def static_asset_check(filename, expected_content_type):
+    path = BASE_DIR / "static" / filename
+    exists = path.exists()
+    readable = os.access(path, os.R_OK) if exists else False
+    guessed_type = mimetypes.guess_type(str(path))[0] or ""
+    ok = exists and readable and guessed_type == expected_content_type
+    return check_item(
+        f"static_{filename}",
+        ok,
+        "ok" if ok else "failed",
+        f"{filename} is available." if ok else f"{filename} is missing, unreadable, or has the wrong content type.",
+        fix_steps=[f"Ensure Dockerfile copies static/{filename} into /app/static/{filename}."],
+        safe_details={
+            "path": str(path),
+            "exists": exists,
+            "readable": readable,
+            "content_type": guessed_type,
+            "expected_content_type": expected_content_type,
+        },
+    )
+
+
+def data_writable_check():
+    path = Path(chat_store_path()).parent
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_path = path / ".agentic_prompt_app_write_check"
+        test_path.write_text("ok", encoding="utf-8")
+        test_path.unlink(missing_ok=True)
+        return check_item("data_writable", True, "ok", f"{path} is writable.", safe_details={"path": str(path)})
+    except Exception as exc:
+        return check_item(
+            "data_writable",
+            False,
+            "failed",
+            f"{path} is not writable.",
+            fix_steps=["Verify the add-on has its /data volume and restart the add-on."],
+            safe_details={"path": str(path), "error": str(exc)},
+        )
+
+
+def home_assistant_api_check():
+    if not home_assistant_token():
+        return check_item(
+            "home_assistant_api",
+            False,
+            "missing_token",
+            "SUPERVISOR_TOKEN is not available, so Home Assistant API context cannot be read.",
+            fix_steps=["Set homeassistant_api: true in config.yaml.", "Rebuild and restart the add-on."],
+            safe_details={"api_url": home_assistant_api_url()},
+        )
+    try:
+        config = home_assistant_config()
+        return check_item(
+            "home_assistant_api",
+            True,
+            "ok",
+            "Home Assistant API is reachable.",
+            safe_details={"api_url": home_assistant_api_url(), "time_zone": config.get("time_zone")},
+        )
+    except Exception as exc:
+        text = str(exc)
+        status = "auth_failed" if "401" in text or "403" in text else "unreachable"
+        return check_item(
+            "home_assistant_api",
+            False,
+            status,
+            "Home Assistant API could not be read.",
+            fix_steps=[
+                "Confirm homeassistant_api: true in config.yaml.",
+                "Restart the add-on after updating permissions.",
+                "Check Supervisor and add-on logs.",
+            ],
+            safe_details={"api_url": home_assistant_api_url(), "error": text[:500]},
+        )
+
+
+def config_status_payload():
+    addon_config = read_addon_config()
+    checks = [
+        check_item(
+            "ingress",
+            addon_config.get("ingress") is True and addon_config.get("ingress_port") == 5000,
+            "ok" if addon_config.get("ingress") is True and addon_config.get("ingress_port") == 5000 else "failed",
+            "Ingress is configured for port 5000."
+            if addon_config.get("ingress") is True and addon_config.get("ingress_port") == 5000
+            else "Ingress must be enabled and ingress_port must be 5000.",
+            fix_steps=["Set ingress: true and ingress_port: 5000 in config.yaml."],
+            safe_details={"ingress": addon_config.get("ingress"), "ingress_port": addon_config.get("ingress_port")},
+        ),
+        check_item(
+            "homeassistant_api_permission",
+            addon_config.get("homeassistant_api") is True,
+            "ok" if addon_config.get("homeassistant_api") is True else "failed",
+            "homeassistant_api permission is enabled."
+            if addon_config.get("homeassistant_api") is True
+            else "homeassistant_api permission is missing.",
+            fix_steps=["Set homeassistant_api: true in config.yaml."],
+            safe_details={"homeassistant_api": addon_config.get("homeassistant_api")},
+        ),
+        check_item(
+            "hassio_api_permission",
+            True,
+            "not_required",
+            "hassio_api is not required for the current read-only Home Assistant API features.",
+            safe_details={"hassio_api": addon_config.get("hassio_api", False)},
+        ),
+        data_writable_check(),
+        home_assistant_api_check(),
+    ]
+    ok = all(item["ok"] or item["status"] == "not_required" for item in checks)
+    return api_success(
+        {
+            "status": "ok" if ok else "needs_attention",
+            "checks": checks,
+            "message": "Configuration checks passed." if ok else "One or more configuration checks need attention.",
+        }
+    )
+
+
+def diagnostics_payload():
+    checks = [
+        static_asset_check("styles.css", "text/css"),
+        static_asset_check("app.js", "text/javascript"),
+        check_item(
+            "flask_bind",
+            os.environ.get("PORT", "5000") == "5000",
+            "ok" if os.environ.get("PORT", "5000") == "5000" else "warning",
+            "Flask is configured for port 5000.",
+            fix_steps=["Set PORT=5000 or match config.yaml ingress_port."],
+            safe_details={"port": os.environ.get("PORT", "5000"), "host": "0.0.0.0"},
+        ),
+        check_item(
+            "request_prefix",
+            True,
+            "observed",
+            "Request prefix diagnostics captured.",
+            safe_details={
+                "script_root": request.script_root,
+                "x_ingress_path": request.headers.get("X-Ingress-Path"),
+                "x_forwarded_prefix": request.headers.get("X-Forwarded-Prefix"),
+                "x_proxy_prefix": request.headers.get("X-Proxy-Prefix"),
+            },
+        ),
+    ]
+    config_payload = config_status_payload()
+    checks.extend(config_payload["checks"])
+    ok = all(item["ok"] or item["status"] in {"not_required", "observed"} for item in checks)
+    return api_success(
+        {
+            "status": "ok" if ok else "needs_attention",
+            "checks": checks,
+            "message": "Diagnostics checks passed." if ok else "Diagnostics found setup issues.",
+        }
+    )
 
 
 def home_assistant_db_path():
@@ -1056,6 +1340,17 @@ def home_assistant_sensor_map():
     stored = load_persisted_sensor_map()
 
     if stored is not None:
+        if isinstance(stored, dict) and "_sensor_map_error" in stored:
+            return {
+                "available": available,
+                "source": "persisted_sensor_map",
+                "api_url": home_assistant_api_url(),
+                "read_only": True,
+                "storage_path": sensor_map_path(),
+                "sensors": stored.get("sensors", []),
+                "message": stored["_sensor_map_error"]["message"],
+                "warning": stored["_sensor_map_error"],
+            }
         return {
             "available": available,
             "source": "home_assistant_api",
@@ -1096,10 +1391,14 @@ def sanitize_sensor_map(rows):
     seen = set()
 
     for row in rows[:250]:
-        sensor = str(row.get("sensor", "")).strip()
+        sensor = re.sub(r"\s+", "", str(row.get("sensor", "")).strip().lower())
         description = str(row.get("description", "")).strip()
         if not sensor and not description:
             continue
+        if sensor and "." not in sensor:
+            description = description or (
+                "Sensor map row may need a full Home Assistant entity ID such as sensor.example."
+            )
         if len(sensor) > 180:
             sensor = sensor[:180]
         if len(description) > 500:
@@ -1109,7 +1408,7 @@ def sanitize_sensor_map(rows):
             continue
         if key:
             seen.add(key)
-        sanitized.append({"sensor": sensor, "description": description})
+        sanitized.append({"sensor": sensor, "description": description or "No description provided."})
 
     return sanitized
 
@@ -1119,8 +1418,24 @@ def load_persisted_sensor_map():
     if not os.path.exists(path):
         return None
 
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        backup_path = f"{path}.corrupt.{int(datetime.now(timezone.utc).timestamp())}"
+        try:
+            shutil.copy2(path, backup_path)
+        except OSError:
+            backup_path = None
+        return {
+            "_sensor_map_error": {
+                "message": "Sensor map file is invalid JSON and was ignored.",
+                "path": path,
+                "backup_path": backup_path,
+                "error": str(exc),
+            },
+            "sensors": [],
+        }
 
     return sanitize_sensor_map(data.get("sensors", []))
 
@@ -1905,10 +2220,15 @@ def create_anthropic_message(model_id, messages):
         with urllib.request.urlopen(api_request, timeout=90) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Claude API error {exc.code}: {detail}") from exc
+        raise classify_provider_http_error("Claude", exc.code) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Claude API connection error: {exc.reason}") from exc
+        raise ProviderApiError(
+            "Claude API could not be reached before the timeout.",
+            status=502,
+            error_type="provider_unreachable",
+            fix_steps=["Check your network connection and try again.", "If this continues, check Anthropic status."],
+            details_safe={"provider": "anthropic", "reason": str(exc.reason)[:300]},
+        ) from exc
 
 
 def anthropic_response(model, model_input, conversation):
@@ -1923,11 +2243,76 @@ def anthropic_response(model, model_input, conversation):
 
 
 def provider_response(provider, model, model_input, conversation):
-    if provider["id"] == "openai":
-        return openai_response(model, model_input, conversation)
-    if provider["id"] == "anthropic":
-        return anthropic_response(model, model_input, conversation)
-    raise ValueError(f"Unknown provider: {provider['id']}")
+    try:
+        if provider["id"] == "openai":
+            return openai_response(model, model_input, conversation)
+        if provider["id"] == "anthropic":
+            return anthropic_response(model, model_input, conversation)
+    except ProviderApiError:
+        raise
+    except Exception as exc:
+        raise classify_provider_exception(provider, exc) from exc
+    raise ApiError(f"Unknown provider: {provider['id']}", status=400, error_type="unknown_provider")
+
+
+def classify_provider_http_error(provider_label, status_code):
+    provider_id = "anthropic" if provider_label == "Claude" else provider_label.lower()
+    if status_code in {401, 403}:
+        return ProviderApiError(
+            f"{provider_label} rejected the configured API key.",
+            status=401,
+            error_type="provider_auth_failed",
+            fix_steps=secret_setup_fix_steps(provider_label),
+            details_safe={"provider": provider_id, "status": status_code},
+        )
+    if status_code == 429:
+        return ProviderApiError(
+            f"{provider_label} rate limit reached.",
+            status=429,
+            error_type="provider_rate_limited",
+            fix_steps=["Wait and try again.", f"Check {provider_label} account limits or billing."],
+            details_safe={"provider": provider_id, "status": status_code},
+        )
+    if status_code >= 500:
+        return ProviderApiError(
+            f"{provider_label} service returned an error.",
+            status=502,
+            error_type="provider_unavailable",
+            fix_steps=[f"Try again later or check {provider_label} service status."],
+            details_safe={"provider": provider_id, "status": status_code},
+        )
+    return ProviderApiError(
+        f"{provider_label} request failed.",
+        status=502,
+        error_type="provider_request_failed",
+        fix_steps=["Check the selected model and provider configuration."],
+        details_safe={"provider": provider_id, "status": status_code},
+    )
+
+
+def classify_provider_exception(provider, exc):
+    provider_label = provider["label"]
+    status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code:
+        return classify_provider_http_error(provider_label, int(status_code))
+
+    text = str(exc)
+    lowered = text.lower()
+    if "timed out" in lowered or "timeout" in lowered:
+        return ProviderApiError(
+            f"{provider_label} request timed out.",
+            status=504,
+            error_type="provider_timeout",
+            fix_steps=["Try again with a shorter prompt.", "Try again later if the provider is slow."],
+            details_safe={"provider": provider["id"]},
+        )
+    return ProviderApiError(
+        f"{provider_label} request failed.",
+        status=502,
+        error_type="provider_request_failed",
+        fix_steps=["Check the provider key, model, billing, and provider status."],
+        details_safe={"provider": provider["id"], "error_class": exc.__class__.__name__},
+    )
 
 
 def utc_timestamp():
@@ -2087,52 +2472,68 @@ def index():
 @app.get("/api/health")
 def health():
     return jsonify(
-        {
-            "ok": True,
-            "default_provider": DEFAULT_PROVIDER,
-            "default_model": DEFAULT_MODEL,
-            "home_assistant_api": bool(home_assistant_token()),
-            "key_status": provider_key_status(),
-        }
+        api_success(
+            {
+                "ok": True,
+                "default_provider": DEFAULT_PROVIDER,
+                "default_model": DEFAULT_MODEL,
+                "home_assistant_api": bool(home_assistant_token()),
+                "key_status": provider_key_status(),
+            }
+        )
     )
 
 
 @app.get("/api/models")
 def models():
     return jsonify(
-        {
-            "providers": provider_catalog(),
-            "models": model_catalog(),
-            "default_provider": DEFAULT_PROVIDER,
-            "default_model": DEFAULT_MODEL,
-            "key_status": provider_key_status(),
-            "pricing_source": MODEL_PRICING_SOURCE,
-            "pricing_note": MODEL_PRICING_NOTE,
-        }
+        api_success(
+            {
+                "providers": provider_catalog(),
+                "models": model_catalog(),
+                "default_provider": DEFAULT_PROVIDER,
+                "default_model": DEFAULT_MODEL,
+                "key_status": provider_key_status(),
+                "pricing_source": MODEL_PRICING_SOURCE,
+                "pricing_note": MODEL_PRICING_NOTE,
+            }
+        )
     )
 
 
 @app.get("/api/key-status")
 def key_status():
-    return jsonify(provider_key_status())
+    return jsonify(api_success(provider_key_status()))
+
+
+@app.get("/api/config-status")
+def config_status():
+    return jsonify(config_status_payload())
+
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    return jsonify(diagnostics_payload())
 
 
 @app.get("/api/messages")
 def messages():
     conversation = get_conversation(request.args.get("chat_id"), create=False)
     return jsonify(
-        {
-            "chat": chat_summary(conversation) if conversation else None,
-            "chats": sorted_chat_summaries(),
-            "active_chat_id": conversation["id"] if conversation else None,
-            "messages": conversation["messages"] if conversation else [],
-            "default_provider": DEFAULT_PROVIDER,
-            "default_model": DEFAULT_MODEL,
-            "providers": provider_catalog(),
-            "models": model_catalog(),
-            "key_status": provider_key_status(),
-            "pricing_source": MODEL_PRICING_SOURCE,
-        }
+        api_success(
+            {
+                "chat": chat_summary(conversation) if conversation else None,
+                "chats": sorted_chat_summaries(),
+                "active_chat_id": conversation["id"] if conversation else None,
+                "messages": conversation["messages"] if conversation else [],
+                "default_provider": DEFAULT_PROVIDER,
+                "default_model": DEFAULT_MODEL,
+                "providers": provider_catalog(),
+                "models": model_catalog(),
+                "key_status": provider_key_status(),
+                "pricing_source": MODEL_PRICING_SOURCE,
+            }
+        )
     )
 
 
@@ -2165,7 +2566,7 @@ def create_chat():
 def update_chat(conversation_id):
     conversation = get_conversation(conversation_id, create=False)
     if not conversation:
-        return jsonify({"error": "Chat not found."}), 404
+        return api_error_response("Chat not found.", status=404, error_type="chat_not_found")
 
     payload = request.get_json(silent=True) or {}
     if "pinned" in payload:
@@ -2187,7 +2588,7 @@ def update_chat(conversation_id):
 def delete_chat(conversation_id):
     load_chat_store()
     if conversation_id not in conversations:
-        return jsonify({"error": "Chat not found."}), 404
+        return api_error_response("Chat not found.", status=404, error_type="chat_not_found")
 
     del conversations[conversation_id]
     remaining = sorted_chat_summaries()
@@ -2210,22 +2611,38 @@ def message():
     user_text = (payload.get("message") or "").strip()
 
     if not user_text:
-        return jsonify({"error": "Message is required."}), 400
+        return api_error_response(
+            "Message is required.",
+            status=400,
+            error_type="empty_prompt",
+            fix_steps=["Type a prompt before pressing Send."],
+        )
+    if len(user_text) > MAX_PROMPT_CHARS:
+        return api_error_response(
+            f"Prompt is too large. Keep prompts under {MAX_PROMPT_CHARS:,} characters.",
+            status=413,
+            error_type="prompt_too_large",
+            fix_steps=["Shorten the prompt or split it into smaller messages."],
+            details_safe={"max_prompt_chars": MAX_PROMPT_CHARS, "received_chars": len(user_text)},
+        )
 
-    try:
-        provider, model = requested_provider_and_model(payload)
-    except ValueError as exc:
-        return jsonify({"error": str(exc), "providers": provider_catalog(), "models": model_catalog()}), 400
+    provider, model = requested_provider_and_model(payload)
 
     key_status_data = provider_key_status()
     provider_status = key_status_data["providers"].get(provider["id"], {})
     if not provider_status.get("configured"):
-        return jsonify(
+        payload = api_error_payload(
+            f"{provider['label']} API key is not configured.",
+            error_type="provider_key_missing",
+            fix_steps=secret_setup_fix_steps(provider["label"]),
+            details_safe={"provider": provider["id"]},
+        )
+        payload.update(
             {
-                "error": f"{provider['label']} API key is not configured.",
                 "key_status": key_status_data,
             }
-        ), 400
+        )
+        return jsonify(payload), 400
 
     model_info = compact_model_info(model)
 
@@ -2241,11 +2658,11 @@ def message():
 
     try:
         response = provider_response(provider, model, model_input, conversation)
-    except Exception as exc:
+    except ProviderApiError as exc:
         conversation["messages"].pop()
         touch_conversation(conversation)
         save_chat_store()
-        return jsonify({"error": str(exc)}), 502
+        return handle_api_error(exc)
 
     assistant_text = response["output_text"]
     conversation["previous_response_id"] = response.get("id") if provider["id"] == "openai" else None
@@ -2293,7 +2710,7 @@ def home_assistant_sleep_summary():
     try:
         return jsonify(summarize_home_assistant_sleep(days=days))
     except (TypeError, ValueError):
-        return jsonify({"error": "days must be a number."}), 400
+        return api_error_response("days must be a number.", status=400, error_type="invalid_days")
 
 
 @app.get("/api/sensor-map")
@@ -2306,7 +2723,7 @@ def update_sensor_map():
     payload = request.get_json(silent=True) or {}
     sensors = payload.get("sensors", [])
     if not isinstance(sensors, list):
-        return jsonify({"error": "sensors must be a list."}), 400
+        return api_error_response("sensors must be a list.", status=400, error_type="invalid_sensor_map")
     return jsonify(save_sensor_map(sensors))
 
 
@@ -2314,13 +2731,13 @@ def update_sensor_map():
 def sensor_plot():
     sensor = (request.args.get("sensor") or "").strip()
     if not sensor:
-        return jsonify({"error": "sensor is required."}), 400
+        return api_error_response("sensor is required.", status=400, error_type="missing_sensor")
 
     days = request.args.get("days", "30")
     try:
         plot = attach_python_plot(query_sensor_points(sensor, days=days))
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 400
+        return api_error_response(str(exc), status=400, error_type="sensor_plot_failed")
 
     return jsonify(plot)
 
@@ -2329,14 +2746,14 @@ def sensor_plot():
 def sensor_data():
     sensor = (request.args.get("sensor") or "").strip()
     if not sensor:
-        return jsonify({"error": "sensor is required."}), 400
+        return api_error_response("sensor is required.", status=400, error_type="missing_sensor")
 
     days = request.args.get("days", "7")
     limit = request.args.get("limit", "80")
     try:
         data = query_sensor_history(sensor, days=days, limit=limit)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 400
+        return api_error_response(str(exc), status=400, error_type="sensor_data_failed")
 
     return jsonify(data)
 

@@ -53,6 +53,10 @@ jobs:
           for i in {1..30}; do
             if curl -sSf http://127.0.0.1:5056/api/health > /dev/null; then
               echo "Flask health check passed"
+              curl -sSf http://127.0.0.1:5056/api/config-status > /dev/null
+              curl -sSf http://127.0.0.1:5056/api/diagnostics > /dev/null
+              curl -sSf http://127.0.0.1:5056/static/styles.css > /dev/null
+              curl -sSf http://127.0.0.1:5056/static/app.js > /dev/null
               exit 0
             fi
             sleep 0.5
@@ -227,9 +231,17 @@ jobs:
           for i in $(seq 1 30); do
             if docker exec "$CONTAINER" bash -lc "docker exec '$ADDON_CONTAINER' sh -lc '
               if command -v curl >/dev/null 2>&1; then
-                curl --max-time 10 -fsS http://127.0.0.1:5000/api/health
+                curl --max-time 10 -fsS http://127.0.0.1:5000/api/health &&
+                curl --max-time 10 -fsS http://127.0.0.1:5000/api/config-status &&
+                curl --max-time 10 -fsS http://127.0.0.1:5000/api/diagnostics &&
+                curl --max-time 10 -fsS http://127.0.0.1:5000/static/styles.css &&
+                curl --max-time 10 -fsS http://127.0.0.1:5000/static/app.js
               elif command -v wget >/dev/null 2>&1; then
-                wget -T 10 -qO- http://127.0.0.1:5000/api/health
+                wget -T 10 -qO- http://127.0.0.1:5000/api/health &&
+                wget -T 10 -qO- http://127.0.0.1:5000/api/config-status &&
+                wget -T 10 -qO- http://127.0.0.1:5000/api/diagnostics &&
+                wget -T 10 -qO- http://127.0.0.1:5000/static/styles.css &&
+                wget -T 10 -qO- http://127.0.0.1:5000/static/app.js
               else
                 python -c \"import urllib.request; r = urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=10); print(r.read().decode()); raise SystemExit(0 if r.status == 200 else r.status)\"
               fi

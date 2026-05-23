@@ -118,9 +118,11 @@ class PromptAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn('href="static/styles.css"', html)
+        self.assertIn('src="static/app.js"', html)
         self.assertIn('id="providerSelect"', html)
         self.assertIn('id="modelSelect"', html)
         self.assertIn('id="modelPrice"', html)
+        self.assertIn('id="setupPanel"', html)
         self.assertNotIn('id="balanceBadge"', html)
         self.assertNotIn("/api/openai-balance", html)
         self.assertIn("OpenAI", html)
@@ -139,7 +141,19 @@ class PromptAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn('href="/api/hassio_ingress/test-token/static/styles.css"', html)
+        self.assertIn('src="/api/hassio_ingress/test-token/static/app.js"', html)
         self.assertIn('const REQUEST_SCRIPT_ROOT = "/api/hassio_ingress/test-token";', html)
+
+    def test_static_assets_are_reachable_with_content_types(self):
+        css_response = self.client.get("/static/styles.css")
+        js_response = self.client.get("/static/app.js")
+
+        self.assertEqual(css_response.status_code, 200)
+        self.assertIn("text/css", css_response.headers["Content-Type"])
+        self.assertIn("--prompt-flow-css-loaded: yes", css_response.get_data(as_text=True))
+        self.assertEqual(js_response.status_code, 200)
+        self.assertIn("javascript", js_response.headers["Content-Type"])
+        self.assertIn("PROMPT_FLOW_STATIC_JS_LOADED", js_response.get_data(as_text=True))
 
     def test_key_status_reports_missing_and_partial_provider_keys(self):
         os.environ.pop("OPENAI_API_KEY", None)
@@ -177,8 +191,110 @@ class PromptAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(data["error"], "OpenAI API key is not configured.")
+        self.assertEqual(data["error_type"], "provider_key_missing")
+        self.assertIn("/config/secrets.yaml", " ".join(data["fix_steps"]))
         self.assertFalse(data["key_status"]["providers"]["openai"]["configured"])
         self.assertFalse(os.path.exists(os.environ["CHAT_STORE_PATH"]))
+
+    def test_config_status_and_diagnostics_report_safe_setup_details(self):
+        config_response = self.client.get("/api/config-status")
+        diagnostics_response = self.client.get("/api/diagnostics")
+        config_data = config_response.get_json()
+        diagnostics_data = diagnostics_response.get_json()
+
+        self.assertEqual(config_response.status_code, 200)
+        self.assertIn("status", config_data)
+        self.assertIn("checks", config_data)
+        self.assertIn("home_assistant_api", {check["name"] for check in config_data["checks"]})
+        self.assertEqual(diagnostics_response.status_code, 200)
+        self.assertIn("status", diagnostics_data)
+        self.assertIn("static_styles.css", {check["name"] for check in diagnostics_data["checks"]})
+        self.assertIn("static_app.js", {check["name"] for check in diagnostics_data["checks"]})
+        self.assertNotIn("test-openai-key", str(diagnostics_data))
+        self.assertNotIn("test-anthropic-key", str(diagnostics_data))
+
+    def test_api_404_returns_structured_json(self):
+        response = self.client.get("/api/not-found")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.content_type.split(";")[0], "application/json")
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error_type"], "http_404")
+
+    def test_empty_and_oversized_prompts_return_structured_errors(self):
+        empty_response = self.client.post("/api/message", json={"message": "   "})
+        empty_data = empty_response.get_json()
+        large_response = self.client.post("/api/message", json={"message": "x" * (app_module.MAX_PROMPT_CHARS + 1)})
+        large_data = large_response.get_json()
+
+        self.assertEqual(empty_response.status_code, 400)
+        self.assertEqual(empty_data["error_type"], "empty_prompt")
+        self.assertEqual(large_response.status_code, 413)
+        self.assertEqual(large_data["error_type"], "prompt_too_large")
+        self.assertEqual(large_data["details_safe"]["max_prompt_chars"], app_module.MAX_PROMPT_CHARS)
+
+    def test_provider_model_mismatch_returns_supported_models(self):
+        response = self.client.post(
+            "/api/message",
+            json={
+                "message": "hello",
+                "provider": "openai",
+                "model": app_module.DEFAULT_CLAUDE_MODEL,
+            },
+        )
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(data["error_type"], "provider_model_mismatch")
+        self.assertIn("supported_models", data["details_safe"])
+        self.assertIn(app_module.DEFAULT_MODEL, data["details_safe"]["supported_models"])
+
+    def test_provider_auth_timeout_and_rate_limit_errors_are_structured(self):
+        class FakeResponses:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def create(self, **kwargs):
+                raise self.exc
+
+        class FakeClient:
+            def __init__(self, exc):
+                self.responses = FakeResponses(exc)
+
+        class StatusError(Exception):
+            status_code = 401
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FakeClient(StatusError("bad key sk-secret-value"))
+        try:
+            auth_response = self.client.post("/api/message", json={"message": "hello"})
+        finally:
+            app_module.get_client = original_get_client
+
+        auth_data = auth_response.get_json()
+        self.assertEqual(auth_response.status_code, 401)
+        self.assertEqual(auth_data["error_type"], "provider_auth_failed")
+        self.assertNotIn("sk-secret-value", str(auth_data))
+
+        rate_error = app_module.classify_provider_http_error("OpenAI", 429)
+        timeout_error = app_module.classify_provider_exception(
+            {"id": "openai", "label": "OpenAI"},
+            TimeoutError("timed out"),
+        )
+        self.assertEqual(rate_error.error_type, "provider_rate_limited")
+        self.assertEqual(timeout_error.error_type, "provider_timeout")
+
+    def test_bad_sensor_map_json_returns_warning_without_crashing(self):
+        Path(os.environ["SENSOR_MAP_PATH"]).write_text("{bad json", encoding="utf-8")
+
+        response = self.client.get("/api/sensor-map")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["sensors"], [])
+        self.assertIn("invalid JSON", data["message"])
+        self.assertIn("warning", data)
 
     def test_message_uses_selected_model_and_stores_response_model_stamp(self):
         class FakeResponses:
@@ -358,8 +474,8 @@ class PromptAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unknown provider", data["error"])
-        self.assertTrue(data["providers"])
-        self.assertTrue(data["models"])
+        self.assertEqual(data["error_type"], "unknown_provider")
+        self.assertIn("openai", data["details_safe"]["supported_providers"])
 
     def test_message_rejects_unknown_model(self):
         response = self.client.post(
@@ -370,7 +486,8 @@ class PromptAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unknown OpenAI model", data["error"])
-        self.assertTrue(data["models"])
+        self.assertEqual(data["error_type"], "unknown_model")
+        self.assertIn(app_module.DEFAULT_MODEL, data["details_safe"]["supported_models"])
 
     def test_completed_sleep_summary_matches_command_line_metrics(self):
         if not app_module.home_assistant_available():
