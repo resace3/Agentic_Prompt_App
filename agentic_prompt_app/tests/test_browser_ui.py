@@ -162,6 +162,7 @@ def test_analysis_visual_artifacts_render_user_friendly_cards(page):
             plotVisible: !!plot && plot.getBoundingClientRect().width > 100,
             dagVisible: !!dag && dag.getBoundingClientRect().width > 100,
             latexText: latex ? latex.textContent : '',
+            latexHtml: latex ? latex.innerHTML : '',
             artifactCount: document.querySelectorAll('.analysis-artifact').length,
           };
         }
@@ -172,4 +173,5 @@ def test_analysis_visual_artifacts_render_user_friendly_cards(page):
     assert result["artifactCount"] == 3
     assert result["plotVisible"] is True
     assert result["dagVisible"] is True
-    assert "\\frac" in result["latexText"]
+    assert "∑" in result["latexText"]
+    assert "latex-frac" in result["latexHtml"]

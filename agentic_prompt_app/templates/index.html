@@ -560,10 +560,134 @@ claude_api_key: sk-ant-...</code></pre>
           .replaceAll("'", "&#039;");
       }
 
+      function renderLatexToHtml(value) {
+        const source = String(value || "").replaceAll("\\\\", "\\");
+        const commandMap = {
+          alpha: "α",
+          beta: "β",
+          gamma: "γ",
+          delta: "δ",
+          epsilon: "ε",
+          theta: "θ",
+          lambda: "λ",
+          mu: "μ",
+          pi: "π",
+          rho: "ρ",
+          sigma: "σ",
+          tau: "τ",
+          phi: "φ",
+          chi: "χ",
+          omega: "ω",
+          Delta: "Δ",
+          Sigma: "Σ",
+          sum: "∑",
+          sqrt: "√",
+          cov: "Cov",
+          Cov: "Cov",
+          var: "Var",
+          Var: "Var",
+          cdot: "·",
+          times: "×",
+          leq: "≤",
+          geq: "≥",
+          neq: "≠",
+          infty: "∞",
+          overline: "",
+          bar: "",
+          text: "",
+        };
+
+        function readGroup(text, start) {
+          if (text[start] !== "{") {
+            return { value: text[start] || "", next: start + 1 };
+          }
+          let depth = 0;
+          let out = "";
+          for (let index = start; index < text.length; index += 1) {
+            const char = text[index];
+            if (char === "{") {
+              if (depth > 0) out += char;
+              depth += 1;
+            } else if (char === "}") {
+              depth -= 1;
+              if (depth === 0) {
+                return { value: out, next: index + 1 };
+              }
+              out += char;
+            } else {
+              out += char;
+            }
+          }
+          return { value: out, next: text.length };
+        }
+
+        function readScript(text, start) {
+          if (text[start] === "{") return readGroup(text, start);
+          return { value: text[start] || "", next: start + 1 };
+        }
+
+        function renderFragment(text) {
+          let html = "";
+          for (let index = 0; index < text.length; index += 1) {
+            const char = text[index];
+            if (char === "\\") {
+              const commandMatch = text.slice(index + 1).match(/^([A-Za-z]+)/);
+              if (!commandMatch) {
+                html += escapeHtml(text[index + 1] || "");
+                index += 1;
+                continue;
+              }
+              const command = commandMatch[1];
+              index += command.length;
+
+              if (command === "frac") {
+                const numerator = readGroup(text, index + 1);
+                const denominator = readGroup(text, numerator.next);
+                html += `<span class="latex-frac"><span class="latex-num">${renderFragment(numerator.value)}</span><span class="latex-den">${renderFragment(denominator.value)}</span></span>`;
+                index = denominator.next - 1;
+              } else if (command === "overline" || command === "bar") {
+                const group = readGroup(text, index + 1);
+                html += `<span class="latex-overline">${renderFragment(group.value)}</span>`;
+                index = group.next - 1;
+              } else if (command === "text") {
+                const group = readGroup(text, index + 1);
+                html += `<span class="latex-text">${escapeHtml(group.value)}</span>`;
+                index = group.next - 1;
+              } else if (command === "left" || command === "right" || command === "quad" || command === "qquad") {
+                continue;
+              } else {
+                html += escapeHtml(commandMap[command] || command);
+              }
+            } else if (char === "_" || char === "^") {
+              const script = readScript(text, index + 1);
+              html += char === "_"
+                ? `<sub>${renderFragment(script.value)}</sub>`
+                : `<sup>${renderFragment(script.value)}</sup>`;
+              index = script.next - 1;
+            } else if (char === "{") {
+              const group = readGroup(text, index);
+              html += renderFragment(group.value);
+              index = group.next - 1;
+            } else if (char === "}") {
+              continue;
+            } else {
+              html += escapeHtml(char);
+            }
+          }
+          return html.replaceAll("\\left", "").replaceAll("\\right", "");
+        }
+
+        return renderFragment(source);
+      }
+
+      function renderLatexBlock(value) {
+        return `<div class="latex-equation rendered-latex">${renderLatexToHtml(value)}</div>`;
+      }
+
       function renderInlineMarkdown(value) {
         return escapeHtml(value)
-          .replace(/\$\$([^$]+)\$\$/g, '<span class="math-inline">$1</span>')
-          .replace(/\$([^$]+)\$/g, '<span class="math-inline">$1</span>')
+          .replace(/\$\$([^$]+)\$\$/g, (_match, latex) => `<span class="math-inline">${renderLatexToHtml(latex)}</span>`)
+          .replace(/\$([^$]+)\$/g, (_match, latex) => `<span class="math-inline">${renderLatexToHtml(latex)}</span>`)
           .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
           .replace(/\*(.+?)\*/g, "<em>$1</em>")
           .replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -640,10 +764,14 @@ claude_api_key: sk-ant-...</code></pre>
               fenceLanguage = (fence[1] || "").toLowerCase();
               fenceLines = [];
             } else {
-              const code = escapeHtml(fenceLines.join("\n"));
-              const languageClass = fenceLanguage ? ` language-${fenceLanguage}` : "";
-              const title = fenceLanguage === "latex" || fenceLanguage === "tex" ? "LaTeX equation" : "Code";
-              html.push(`<figure class="code-block${languageClass}"><figcaption>${title}</figcaption><pre><code>${code}</code></pre></figure>`);
+              const rawFence = fenceLines.join("\n");
+              if (fenceLanguage === "latex" || fenceLanguage === "tex") {
+                html.push(renderLatexBlock(rawFence));
+              } else {
+                const code = escapeHtml(rawFence);
+                const languageClass = fenceLanguage ? ` language-${fenceLanguage}` : "";
+                html.push(`<figure class="code-block${languageClass}"><figcaption>Code</figcaption><pre><code>${code}</code></pre></figure>`);
+              }
               inFence = false;
               fenceLanguage = "";
               fenceLines = [];
@@ -733,8 +861,8 @@ claude_api_key: sk-ant-...</code></pre>
             card.appendChild(image);
           } else if (artifact.type === "latex") {
             const equation = document.createElement("div");
-            equation.className = "latex-equation";
-            equation.textContent = artifact.latex || "";
+            equation.className = "latex-equation rendered-latex";
+            equation.innerHTML = renderLatexToHtml(artifact.latex || "");
             card.appendChild(equation);
           }
 

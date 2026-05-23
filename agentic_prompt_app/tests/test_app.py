@@ -1417,13 +1417,13 @@ class PromptAppTests(unittest.TestCase):
 
     def test_analysis_visuals_renderer_outputs_plot_dag_and_latex_cards(self):
         template = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
-        start = template.index("function buildAnalysisVisualsCard")
+        start = template.index("function escapeHtml")
         end = template.index("function messageElement")
         renderer_source = template[start:end]
         script = (
             "class Node {"
             "constructor(name){this.name=name;this.children=[];this.attrs={};this.textContent='';"
-            "this.className='';this.src='';this.alt='';}"
+            "this.className='';this.src='';this.alt='';this.innerHTML='';}"
             "appendChild(node){this.children.push(node);return node;}"
             "append(...nodes){this.children.push(...nodes);}"
             "setAttribute(key,value){this.attrs[key]=String(value);}"
@@ -1440,9 +1440,10 @@ class PromptAppTests(unittest.TestCase):
               ]
             };
             const card=buildAnalysisVisualsCard(visuals);
-            function collect(node,out={images:[],text:[],classes:[]}) {
+            function collect(node,out={images:[],text:[],html:[],classes:[]}) {
               if (node.name === 'img') out.images.push({src:node.src, alt:node.alt, klass:node.className});
               if (node.textContent) out.text.push(node.textContent);
+              if (node.innerHTML) out.html.push(node.innerHTML);
               if (node.className) out.classes.push(node.className);
               for (const child of node.children || []) collect(child,out);
               return out;
@@ -1461,8 +1462,8 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn("analysis-plot-image", result.stdout)
         self.assertIn("dag-image", result.stdout)
         self.assertIn("latex-equation", result.stdout)
+        self.assertIn("latex-frac", result.stdout)
         self.assertIn("data:image/svg+xml;base64,dag", result.stdout)
-        self.assertIn("\\\\frac", result.stdout)
 
 
 if __name__ == "__main__":

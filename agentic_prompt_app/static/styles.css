@@ -909,9 +909,55 @@ tr:last-child td {
   border: 1px solid #bfdbfe;
   border-radius: 10px;
   background: #eff6ff;
-  font-size: 1.04rem;
+  font-size: 1.08rem;
   line-height: 1.55;
-  white-space: pre-wrap;
+  white-space: normal;
+}
+
+.rendered-latex {
+  display: block;
+}
+
+.latex-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  margin: 0 0.18em;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.latex-num {
+  display: block;
+  padding: 0 0.2em 0.08em;
+  border-bottom: 1.5px solid currentColor;
+  line-height: 1.15;
+}
+
+.latex-den {
+  display: block;
+  padding: 0.08em 0.2em 0;
+  line-height: 1.15;
+}
+
+.latex-overline {
+  display: inline-block;
+  padding-top: 0.04em;
+  text-decoration: overline;
+}
+
+.latex-text {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-style: normal;
+}
+
+.latex-equation sub,
+.latex-equation sup,
+.math-inline sub,
+.math-inline sup {
+  font-size: 0.72em;
+  line-height: 0;
 }
 
 .math-inline {
