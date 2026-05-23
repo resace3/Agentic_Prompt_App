@@ -32,6 +32,18 @@ from werkzeug.exceptions import HTTPException
 
 DEFAULT_PROVIDER = "openai"
 DEFAULT_MODEL = "gpt-4.1-nano"
+SECRET_PROVIDERS = {
+    "openai": {
+        "label": "OpenAI",
+        "secret_name": "openai_api_key",
+        "env_names": ["OPENAI_API_KEY"],
+    },
+    "anthropic": {
+        "label": "Claude",
+        "secret_name": "claude_api_key",
+        "env_names": ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+    },
+}
 MODEL_PRICING_SOURCE = "https://platform.openai.com/docs/pricing"
 MODEL_PRICING_NOTE = "Standard short-context API pricing per 1M tokens."
 AVAILABLE_MODELS = [
@@ -326,17 +338,38 @@ SLEEP_METRIC_ENTITIES = {
 }
 
 
-def load_secret_value(secret_name, env_name, provider_label):
-    if os.environ.get(env_name):
-        return os.environ[env_name]
-
-    candidate_paths = [
+def secret_candidate_paths():
+    return [
         os.environ.get("SECRETS_YAML"),
         "/config/secrets.yaml",
         os.path.join(os.getcwd(), "secrets.yaml"),
     ]
 
-    for path in [p for p in candidate_paths if p]:
+
+def configured_secret_source(secret_name, env_names):
+    for env_name in env_names:
+        if os.environ.get(env_name):
+            return "environment"
+
+    for path in [p for p in secret_candidate_paths() if p]:
+        if not os.path.exists(path):
+            continue
+
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+
+        api_key = data.get(secret_name)
+        if api_key:
+            return "secrets.yaml"
+    return None
+
+
+def load_secret_value(secret_name, env_names, provider_label):
+    for env_name in env_names:
+        if os.environ.get(env_name):
+            return os.environ[env_name]
+
+    for path in [p for p in secret_candidate_paths() if p]:
         if not os.path.exists(path):
             continue
 
@@ -347,17 +380,62 @@ def load_secret_value(secret_name, env_name, provider_label):
         if api_key:
             return str(api_key).strip()
 
+    env_label = " or ".join(env_names)
     raise RuntimeError(
-        f"{provider_label} API key not found. Add {secret_name} to /config/secrets.yaml or set {env_name}."
+        f"{provider_label} API key not found. Add {secret_name} to /config/secrets.yaml or set {env_label}."
     )
 
 
 def load_openai_key():
-    return load_secret_value("openai_api_key", "OPENAI_API_KEY", "OpenAI")
+    config = SECRET_PROVIDERS["openai"]
+    return load_secret_value(config["secret_name"], config["env_names"], config["label"])
 
 
 def load_claude_key():
-    return load_secret_value("claude_api_key", "CLAUDE_API_KEY", "Claude")
+    config = SECRET_PROVIDERS["anthropic"]
+    return load_secret_value(config["secret_name"], config["env_names"], config["label"])
+
+
+def provider_key_status():
+    providers = {}
+    missing_labels = []
+    configured_labels = []
+    for provider_id, config in SECRET_PROVIDERS.items():
+        source = configured_secret_source(config["secret_name"], config["env_names"])
+        configured = bool(source)
+        providers[provider_id] = {
+            "label": config["label"],
+            "configured": configured,
+            "source": source,
+            "secret_name": config["secret_name"],
+            "env_name": config["env_names"][0],
+            "env_names": config["env_names"],
+        }
+        if configured:
+            configured_labels.append(config["label"])
+        else:
+            missing_labels.append(config["label"])
+
+    if not configured_labels:
+        message = "No AI provider API keys are configured. Add OpenAI and/or Claude keys to secrets.yaml."
+    elif missing_labels:
+        message = f"You have {', '.join(configured_labels)} configured, but not {', '.join(missing_labels)}."
+    else:
+        message = "OpenAI and Claude API keys are configured."
+
+    return {
+        "providers": providers,
+        "configured": configured_labels,
+        "missing": missing_labels,
+        "all_configured": not missing_labels,
+        "any_configured": bool(configured_labels),
+        "message": message,
+        "help": {
+            "path": "/config/secrets.yaml",
+            "example": "openai_api_key: sk-...\nclaude_api_key: sk-ant-...",
+            "note": "Add only the providers you plan to use, then restart the add-on.",
+        },
+    }
 
 
 def get_client():
@@ -419,15 +497,15 @@ def requested_provider_and_model(payload):
 
 def compact_model_info(model):
     return {
-        "id": model["id"],
-        "label": model["label"],
+        "id": model.get("id"),
+        "label": model.get("label"),
         "provider": model.get("provider"),
         "provider_label": model.get("provider_label"),
-        "input_per_1m": model["input_per_1m"],
-        "cached_input_per_1m": model["cached_input_per_1m"],
-        "output_per_1m": model["output_per_1m"],
-        "note": model["note"],
+        "input_per_1m": model.get("input_per_1m"),
+        "cached_input_per_1m": model.get("cached_input_per_1m"),
+        "output_per_1m": model.get("output_per_1m"),
         "pricing_source": model.get("pricing_source"),
+        "note": model.get("note"),
     }
 
 
@@ -2001,6 +2079,7 @@ def index():
         default_model=DEFAULT_MODEL,
         providers=provider_catalog(),
         models=model_catalog(),
+        key_status=provider_key_status(),
         pricing_source=MODEL_PRICING_SOURCE,
     )
 
@@ -2013,6 +2092,7 @@ def health():
             "default_provider": DEFAULT_PROVIDER,
             "default_model": DEFAULT_MODEL,
             "home_assistant_api": bool(home_assistant_token()),
+            "key_status": provider_key_status(),
         }
     )
 
@@ -2025,10 +2105,16 @@ def models():
             "models": model_catalog(),
             "default_provider": DEFAULT_PROVIDER,
             "default_model": DEFAULT_MODEL,
+            "key_status": provider_key_status(),
             "pricing_source": MODEL_PRICING_SOURCE,
             "pricing_note": MODEL_PRICING_NOTE,
         }
     )
+
+
+@app.get("/api/key-status")
+def key_status():
+    return jsonify(provider_key_status())
 
 
 @app.get("/api/messages")
@@ -2044,6 +2130,7 @@ def messages():
             "default_model": DEFAULT_MODEL,
             "providers": provider_catalog(),
             "models": model_catalog(),
+            "key_status": provider_key_status(),
             "pricing_source": MODEL_PRICING_SOURCE,
         }
     )
@@ -2129,6 +2216,16 @@ def message():
         provider, model = requested_provider_and_model(payload)
     except ValueError as exc:
         return jsonify({"error": str(exc), "providers": provider_catalog(), "models": model_catalog()}), 400
+
+    key_status_data = provider_key_status()
+    provider_status = key_status_data["providers"].get(provider["id"], {})
+    if not provider_status.get("configured"):
+        return jsonify(
+            {
+                "error": f"{provider['label']} API key is not configured.",
+                "key_status": key_status_data,
+            }
+        ), 400
 
     model_info = compact_model_info(model)
 

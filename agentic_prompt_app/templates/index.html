@@ -27,6 +27,10 @@
             <p>Read-only sensor context with per-response model stamps.</p>
           </div>
           <div class="topbar-actions">
+            <div id="keyStatus" class="key-status" data-state="unknown">
+              <span id="keyStatusText">Checking keys...</span>
+              <button id="keyHelpButton" class="key-help-button" type="button" aria-expanded="false" title="API key setup help">?</button>
+            </div>
             <label class="provider-picker" for="providerSelect">
               <span>Provider</span>
               <select id="providerSelect" name="provider">
@@ -45,6 +49,16 @@
             <button id="resetButton" type="button" title="Start a new chat">Reset</button>
           </div>
         </header>
+
+        <section id="keyHelpPanel" class="key-help-panel" hidden>
+          <div>
+            <strong>Add API keys in Home Assistant</strong>
+            <p>Add one or both provider keys to <code>/config/secrets.yaml</code>, then restart this add-on.</p>
+            <pre><code>openai_api_key: sk-...
+claude_api_key: sk-ant-...</code></pre>
+            <p>OpenAI enables OpenAI models. Claude enables Anthropic Claude models.</p>
+          </div>
+        </section>
 
         <nav class="tabs" aria-label="Main sections">
           <button class="tab active" type="button" data-tab="prompts">Prompts</button>
@@ -119,6 +133,10 @@
       const input = document.querySelector("#messageInput");
       const sendButton = document.querySelector("#sendButton");
       const resetButton = document.querySelector("#resetButton");
+      const keyStatusEl = document.querySelector("#keyStatus");
+      const keyStatusText = document.querySelector("#keyStatusText");
+      const keyHelpButton = document.querySelector("#keyHelpButton");
+      const keyHelpPanel = document.querySelector("#keyHelpPanel");
       const providerSelect = document.querySelector("#providerSelect");
       const modelSelect = document.querySelector("#modelSelect");
       const modelPrice = document.querySelector("#modelPrice");
@@ -142,6 +160,7 @@
       const MODEL_OPTIONS = {{ models | tojson }};
       const DEFAULT_PROVIDER = {{ default_provider | tojson }};
       const DEFAULT_MODEL = {{ default_model | tojson }};
+      let keyStatus = {{ key_status | tojson }};
       const PROVIDER_STORAGE_KEY = "promptFlowSelectedProvider.v1";
       const MODEL_STORAGE_KEY = "promptFlowSelectedModel.v5";
       let messages = [];
@@ -195,6 +214,42 @@
         return { response, data };
       }
 
+      function providerKeyLabel(providerId) {
+        return providerById(providerId).label || providerId;
+      }
+
+      function renderKeyStatus() {
+        const providers = keyStatus && keyStatus.providers ? keyStatus.providers : {};
+        const selectedProviderStatus = providers[selectedProvider().id] || {};
+        keyStatusText.textContent = keyStatus && keyStatus.message
+          ? keyStatus.message
+          : "API key status unavailable.";
+
+        let state = "missing";
+        if (keyStatus && keyStatus.all_configured) {
+          state = "ready";
+        } else if (keyStatus && keyStatus.any_configured) {
+          state = selectedProviderStatus.configured ? "partial-ready" : "partial-missing";
+        }
+        keyStatusEl.dataset.state = state;
+        sendButton.title = selectedProviderStatus.configured
+          ? ""
+          : `Add a ${providerKeyLabel(selectedProvider().id)} API key before sending.`;
+      }
+
+      async function refreshKeyStatus() {
+        try {
+          const { response, data } = await fetchJson("/api/key-status");
+          if (response.ok) {
+            keyStatus = data;
+            renderKeyStatus();
+          }
+        } catch (error) {
+          keyStatusText.textContent = `API key status unavailable: ${error.message}`;
+          keyStatusEl.dataset.state = "missing";
+        }
+      }
+
       function scrollMessages() {
         messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
       }
@@ -245,6 +300,7 @@
           modelSelect.value = preferred.id;
         }
         updateModelPrice();
+        renderKeyStatus();
       }
 
       function formatPrice(value) {
@@ -1011,13 +1067,21 @@
 
       saveSensorMapButton.addEventListener("click", saveSensorMap);
       plotButton.addEventListener("click", plotSelectedSensor);
+      keyHelpButton.addEventListener("click", () => {
+        const shouldShow = keyHelpPanel.hidden;
+        keyHelpPanel.hidden = !shouldShow;
+        keyHelpButton.setAttribute("aria-expanded", String(shouldShow));
+      });
       const savedProvider = localStorage.getItem(PROVIDER_STORAGE_KEY);
       const savedModel = localStorage.getItem(MODEL_STORAGE_KEY);
       if (PROVIDER_OPTIONS.some((provider) => provider.id === savedProvider)) {
         providerSelect.value = savedProvider;
       }
       renderModelOptions(savedModel);
-      providerSelect.addEventListener("change", () => renderModelOptions());
+      providerSelect.addEventListener("change", () => {
+        renderModelOptions();
+        renderKeyStatus();
+      });
       modelSelect.addEventListener("change", updateModelPrice);
 
       form.addEventListener("submit", async (event) => {
@@ -1092,6 +1156,8 @@
         input.focus();
       });
 
+      renderKeyStatus();
+      refreshKeyStatus();
       loadMessages();
     </script>
   </body>

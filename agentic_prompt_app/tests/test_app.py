@@ -17,8 +17,16 @@ class PromptAppTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.previous_sensor_map_path = os.environ.get("SENSOR_MAP_PATH")
         self.previous_chat_store_path = os.environ.get("CHAT_STORE_PATH")
+        self.previous_openai_key = os.environ.get("OPENAI_API_KEY")
+        self.previous_anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        self.previous_claude_key = os.environ.get("CLAUDE_API_KEY")
+        self.previous_secrets_yaml = os.environ.get("SECRETS_YAML")
         os.environ["SENSOR_MAP_PATH"] = os.path.join(self.temp_dir.name, "sensor_map.json")
         os.environ["CHAT_STORE_PATH"] = os.path.join(self.temp_dir.name, "chat_history.json")
+        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+        os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
+        os.environ.pop("CLAUDE_API_KEY", None)
+        os.environ["SECRETS_YAML"] = os.path.join(self.temp_dir.name, "missing-secrets.yaml")
         app_module.conversations.clear()
         app_module.chat_store_loaded_path = None
         self.client = app_module.app.test_client()
@@ -32,6 +40,22 @@ class PromptAppTests(unittest.TestCase):
             os.environ.pop("CHAT_STORE_PATH", None)
         else:
             os.environ["CHAT_STORE_PATH"] = self.previous_chat_store_path
+        if self.previous_openai_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = self.previous_openai_key
+        if self.previous_anthropic_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = self.previous_anthropic_key
+        if self.previous_claude_key is None:
+            os.environ.pop("CLAUDE_API_KEY", None)
+        else:
+            os.environ["CLAUDE_API_KEY"] = self.previous_claude_key
+        if self.previous_secrets_yaml is None:
+            os.environ.pop("SECRETS_YAML", None)
+        else:
+            os.environ["SECRETS_YAML"] = self.previous_secrets_yaml
         app_module.chat_store_loaded_path = None
         self.temp_dir.cleanup()
 
@@ -76,6 +100,8 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn("pricing", data["pricing_source"])
         self.assertIn("openai", {provider["id"] for provider in data["providers"]})
         self.assertIn("anthropic", {provider["id"] for provider in data["providers"]})
+        self.assertTrue(data["key_status"]["providers"]["openai"]["configured"])
+        self.assertTrue(data["key_status"]["providers"]["anthropic"]["configured"])
         gpt_41_nano = next(model for model in data["models"] if model["id"] == "gpt-4.1-nano")
         claude_haiku = next(model for model in data["models"] if model["id"] == app_module.DEFAULT_CLAUDE_MODEL)
         self.assertEqual(data["default_model"], "gpt-4.1-nano")
@@ -103,6 +129,9 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn(app_module.DEFAULT_CLAUDE_MODEL, html)
         self.assertIn("promptFlowSelectedModel.v5", html)
         self.assertIn('className = "pinned-marker"', html)
+        self.assertIn('id="keyStatus"', html)
+        self.assertIn('id="keyHelpButton"', html)
+        self.assertIn("openai_api_key: sk-...", html)
 
     def test_index_uses_ingress_prefix_for_static_assets(self):
         response = self.client.get("/", headers={"X-Ingress-Path": "/api/hassio_ingress/test-token"})
@@ -111,6 +140,45 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('href="/api/hassio_ingress/test-token/static/styles.css"', html)
         self.assertIn('const REQUEST_SCRIPT_ROOT = "/api/hassio_ingress/test-token";', html)
+
+    def test_key_status_reports_missing_and_partial_provider_keys(self):
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("CLAUDE_API_KEY", None)
+
+        missing_response = self.client.get("/api/key-status")
+        missing = missing_response.get_json()
+        self.assertEqual(missing_response.status_code, 200)
+        self.assertFalse(missing["any_configured"])
+        self.assertIn("No AI provider API keys", missing["message"])
+        self.assertFalse(missing["providers"]["openai"]["configured"])
+        self.assertFalse(missing["providers"]["anthropic"]["configured"])
+
+        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+        partial_response = self.client.get("/api/key-status")
+        partial = partial_response.get_json()
+        self.assertEqual(partial_response.status_code, 200)
+        self.assertTrue(partial["providers"]["openai"]["configured"])
+        self.assertFalse(partial["providers"]["anthropic"]["configured"])
+        self.assertEqual(partial["configured"], ["OpenAI"])
+        self.assertEqual(partial["missing"], ["Claude"])
+        self.assertIn("You have OpenAI configured, but not Claude", partial["message"])
+
+    def test_missing_selected_provider_key_returns_clear_json_error(self):
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("CLAUDE_API_KEY", None)
+
+        response = self.client.post(
+            "/api/message",
+            json={"message": "hello", "provider": "openai", "model": "gpt-4.1-nano"},
+        )
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(data["error"], "OpenAI API key is not configured.")
+        self.assertFalse(data["key_status"]["providers"]["openai"]["configured"])
+        self.assertFalse(os.path.exists(os.environ["CHAT_STORE_PATH"]))
 
     def test_message_uses_selected_model_and_stores_response_model_stamp(self):
         class FakeResponses:
