@@ -67,11 +67,25 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     needs: test
+    strategy:
+      matrix:
+        platform: ["linux/amd64", "linux/arm64"]
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build Docker image
-        run: docker build -f agentic_prompt_app/Dockerfile -t agentic-prompt-app-addon:ci agentic_prompt_app
+        run: |
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            -f agentic_prompt_app/Dockerfile \
+            -t agentic-prompt-app-addon:ci \
+            agentic_prompt_app
 
   browser-ui:
     runs-on: ubuntu-latest

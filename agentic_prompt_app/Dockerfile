@@ -4,12 +4,13 @@ FROM ${BUILD_FROM}
 WORKDIR /app
 
 COPY requirements.txt .
-RUN if command -v python3 >/dev/null 2>&1; then PYTHON_BIN=python3; else PYTHON_BIN=python; fi; \
-    if ! "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then \
-        apk add --no-cache python3 py3-pip; \
-        PYTHON_BIN=python3; \
-    fi; \
-    "$PYTHON_BIN" -m pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN if command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache python3 py3-pip py3-matplotlib; \
+        grep -viE '^matplotlib==' requirements.txt > /tmp/requirements-docker.txt; \
+        python3 -m pip install --no-cache-dir --break-system-packages -r /tmp/requirements-docker.txt; \
+    else \
+        python -m pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 COPY app.py .
 COPY templates ./templates
