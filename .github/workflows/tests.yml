@@ -330,7 +330,38 @@ jobs:
           SECRET_FILE="${RUNNER_TEMP}/secrets.yaml"
           RECORDER_DB="${RUNNER_TEMP}/home-assistant_v2.db"
           printf 'openai_api_key: %s\n' "$OPENAI_API_KEY" > "$SECRET_FILE"
-          printf 'SQLite format 3\000' > "$RECORDER_DB"
+          python3 - <<'PY'
+          import os
+          import sqlite3
+          import time
+          from pathlib import Path
+
+          db_path = Path(os.environ["RUNNER_TEMP"]) / "home-assistant_v2.db"
+          now = time.time()
+          with sqlite3.connect(db_path) as connection:
+              connection.execute(
+                  "CREATE TABLE states_meta (metadata_id INTEGER PRIMARY KEY, entity_id VARCHAR(255))"
+              )
+              connection.execute(
+                  """
+                  CREATE TABLE states (
+                      state_id INTEGER PRIMARY KEY,
+                      state VARCHAR(255),
+                      last_updated_ts FLOAT,
+                      metadata_id INTEGER
+                  )
+                  """
+              )
+              connection.execute(
+                  "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
+                  (1, "sensor.nick_r_steps"),
+              )
+              for index, value in enumerate((4200, 5100, 6300, 5800, 7100, 6900, 7500), start=1):
+                  connection.execute(
+                      "INSERT INTO states (state_id, state, last_updated_ts, metadata_id) VALUES (?, ?, ?, ?)",
+                      (index, str(value), now - (7 - index) * 86400, 1),
+                  )
+          PY
 
           docker exec "$CONTAINER" bash -lc "mkdir -p /mnt/supervisor/homeassistant"
           docker cp "$SECRET_FILE" "$CONTAINER":/mnt/supervisor/homeassistant/secrets.yaml
@@ -479,6 +510,56 @@ jobs:
           )
           assert_ok(status == 200, sensor_map)
           assert_ok(len(sensor_map.get('sensors', [])) == 4, sensor_map)
+
+          status, chat = request_json('/api/chats', method='POST')
+          assert_ok(status == 201, chat)
+          sensor_map_chat_id = chat['active_chat_id']
+          status, add_prompt = request_json(
+              '/api/message',
+              method='POST',
+              payload={
+                  'message': 'I think I have something along the lines of sensor.nick_r_Steps could you add it to the sensor map?',
+                  'provider': 'openai',
+                  'model': MODEL,
+                  'chat_id': sensor_map_chat_id,
+              },
+          )
+          assert_ok(status == 200, add_prompt)
+          assert_ok('Do you want me to add it' in add_prompt.get('assistant', ''), add_prompt)
+          status, unchanged_map = request_json('/api/sensor-map')
+          assert_ok(status == 200, unchanged_map)
+          assert_ok(len(unchanged_map.get('sensors', [])) == 4, unchanged_map)
+
+          status, confirm_add = request_json(
+              '/api/message',
+              method='POST',
+              payload={
+                  'message': 'yes, add it',
+                  'provider': 'openai',
+                  'model': MODEL,
+                  'chat_id': sensor_map_chat_id,
+              },
+          )
+          assert_ok(status == 200, confirm_add)
+          assert_ok('sensor.nick_r_steps' in confirm_add.get('assistant', ''), confirm_add)
+          status, updated_map = request_json('/api/sensor-map')
+          assert_ok(status == 200, updated_map)
+          updated_sensors = {row['sensor'] for row in updated_map.get('sensors', [])}
+          assert_ok('sensor.nick_r_steps' in updated_sensors, updated_map)
+          assert_ok(len(updated_sensors) == 5, updated_map)
+
+          status, delete_guidance = request_json(
+              '/api/message',
+              method='POST',
+              payload={
+                  'message': 'Can you delete this add-on app for me?',
+                  'provider': 'openai',
+                  'model': MODEL,
+              },
+          )
+          assert_ok(status == 200, delete_guidance)
+          assert_ok('manually in Home Assistant' in delete_guidance.get('assistant', ''), delete_guidance)
+          assert_ok(gpt_call_count == 0, f'Deterministic sensor-map/app actions must not call GPT; got {gpt_call_count}')
 
           chat_ids = []
           for _ in range(4):

@@ -244,6 +244,10 @@ PLOT_TYPE_ALIASES = {
     "area": ("area plot", "area chart", "filled area"),
     "line": ("line plot", "line chart", "line graph", "trend line"),
 }
+ENTITY_ID_PATTERN = re.compile(r"\b[a-zA-Z_]+\.[a-zA-Z0-9_]+\b")
+SENSOR_MAP_ADD_TERMS = ("add", "include", "put", "save", "map")
+CONFIRM_TERMS = ("yes", "yeah", "yep", "sure", "confirm", "add it", "please do", "go ahead")
+DENY_TERMS = ("no", "nope", "cancel", "don't", "do not", "never mind", "nevermind")
 MAX_CONTEXT_SLEEP_DAYS = 365
 DEFAULT_SLEEP_DAYS = 30
 WEEK_SLEEP_DAYS = 7
@@ -1478,6 +1482,13 @@ def describe_sensor(entity_id):
     return f"Likely sleep-related Home Assistant entity for {name}."
 
 
+def describe_sensor_map_candidate(entity_id):
+    name = entity_id.split(".", 1)[-1].replace("_", " ")
+    if "step" in entity_id.lower():
+        return "Step count sensor."
+    return describe_sensor(entity_id)
+
+
 def home_assistant_sensor_map():
     available = home_assistant_available()
     stored = load_persisted_sensor_map()
@@ -1611,6 +1622,60 @@ def save_sensor_map(rows):
 
 def sensor_map_entity_ids():
     return [row["sensor"] for row in load_sensor_map()["sensors"] if row.get("sensor")]
+
+
+def normalize_entity_id(entity_id):
+    return re.sub(r"\s+", "", str(entity_id or "").strip().lower())
+
+
+def extract_entity_ids(user_text):
+    return [normalize_entity_id(match.group(0)) for match in ENTITY_ID_PATTERN.finditer(user_text)]
+
+
+def text_confirms(text):
+    lowered = text.lower()
+    return any(term in lowered for term in CONFIRM_TERMS)
+
+
+def text_denies(text):
+    lowered = text.lower()
+    return any(term in lowered for term in DENY_TERMS)
+
+
+def detect_sensor_map_add_request(user_text):
+    lowered = user_text.lower()
+    if "sensor map" not in lowered:
+        return None
+    if not any(term in lowered for term in SENSOR_MAP_ADD_TERMS):
+        return None
+
+    entity_ids = extract_entity_ids(user_text)
+    if not entity_ids:
+        return None
+
+    entity_id = entity_ids[0]
+    return {
+        "type": "add_sensor_map",
+        "sensor": entity_id,
+        "description": describe_sensor_map_candidate(entity_id),
+    }
+
+
+def detect_app_delete_request(user_text):
+    lowered = user_text.lower()
+    delete_requested = any(term in lowered for term in ("delete", "remove", "uninstall"))
+    app_requested = any(
+        term in lowered
+        for term in (
+            "add-on",
+            "addon",
+            "app",
+            "agentic prompt",
+            "prompt flow",
+            "this tool",
+        )
+    )
+    return delete_requested and app_requested and "chat" not in lowered and "sensor map" not in lowered
 
 
 def sleep_metric_for_entity(entity_id):
@@ -2988,6 +3053,35 @@ def sorted_chat_summaries():
     return pinned + unpinned
 
 
+def append_assistant_message(conversation, content, extra=None):
+    assistant_message = {"role": "assistant", "content": content}
+    if extra:
+        assistant_message.update(extra)
+    conversation["messages"].append(assistant_message)
+    touch_conversation(conversation)
+    save_chat_store()
+    return assistant_message
+
+
+def message_response_payload(conversation, assistant_text, provider=None, model=None, extra=None):
+    payload = {
+        "chat": chat_summary(conversation),
+        "chats": sorted_chat_summaries(),
+        "active_chat_id": conversation["id"],
+        "assistant": assistant_text,
+        "messages": conversation["messages"],
+    }
+    if provider:
+        payload["provider"] = provider["id"]
+        payload["provider_info"] = dict(provider)
+    if model:
+        payload["model"] = model["id"]
+        payload["model_info"] = compact_model_info(model)
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def create_conversation(title="New chat"):
     load_chat_store()
     conversation = default_conversation(title=title)
@@ -3157,6 +3251,93 @@ def delete_chat(conversation_id):
     )
 
 
+def handle_sensor_map_confirmation(conversation, user_text):
+    pending = conversation.get("pending_action")
+    if not isinstance(pending, dict) or pending.get("type") != "add_sensor_map":
+        return None
+    if text_denies(user_text):
+        conversation.pop("pending_action", None)
+        assistant_text = f"Okay. I did not add `{pending.get('sensor')}` to the sensor map."
+        append_assistant_message(
+            conversation,
+            assistant_text,
+            {"sensor_map_action": {"type": "add_sensor_map_cancelled", "sensor": pending.get("sensor")}},
+        )
+        return assistant_text
+    if not text_confirms(user_text):
+        return None
+
+    sensor = normalize_entity_id(pending.get("sensor"))
+    description = str(pending.get("description") or describe_sensor_map_candidate(sensor)).strip()
+    current_rows = load_sensor_map().get("sensors", [])
+    existing = {row.get("sensor") for row in current_rows}
+    if sensor in existing:
+        assistant_text = f"`{sensor}` is already in the sensor map, so I did not add a duplicate."
+        action_type = "add_sensor_map_already_exists"
+        saved = load_sensor_map()
+    else:
+        saved = save_sensor_map([*current_rows, {"sensor": sensor, "description": description}])
+        assistant_text = f"Added `{sensor}` to the sensor map with description: {description}"
+        action_type = "add_sensor_map_completed"
+
+    conversation.pop("pending_action", None)
+    append_assistant_message(
+        conversation,
+        assistant_text,
+        {
+            "sensor_map_action": {
+                "type": action_type,
+                "sensor": sensor,
+                "description": description,
+                "sensors_count": len(saved.get("sensors", [])),
+            }
+        },
+    )
+    return assistant_text
+
+
+def handle_deterministic_message_action(conversation, user_text):
+    confirmation = handle_sensor_map_confirmation(conversation, user_text)
+    if confirmation is not None:
+        return confirmation
+
+    if detect_app_delete_request(user_text):
+        conversation.pop("pending_action", None)
+        assistant_text = (
+            "I cannot delete or uninstall a Home Assistant add-on for you. "
+            "You need to do that manually in Home Assistant: Settings > Add-ons > "
+            "Agentic Prompt App > Uninstall or Remove."
+        )
+        append_assistant_message(
+            conversation,
+            assistant_text,
+            {"manual_action_required": {"type": "delete_addon", "target": "agentic_prompt_app"}},
+        )
+        return assistant_text
+
+    add_request = detect_sensor_map_add_request(user_text)
+    if add_request:
+        conversation["pending_action"] = add_request
+        assistant_text = (
+            f"I found `{add_request['sensor']}`. Do you want me to add it to the sensor map "
+            f"with this description: {add_request['description']} Reply yes to add it, or no to cancel."
+        )
+        append_assistant_message(
+            conversation,
+            assistant_text,
+            {
+                "sensor_map_action": {
+                    "type": "add_sensor_map_confirmation_required",
+                    "sensor": add_request["sensor"],
+                    "description": add_request["description"],
+                }
+            },
+        )
+        return assistant_text
+
+    return None
+
+
 @app.post("/api/message")
 def message():
     payload = request.get_json(silent=True) or {}
@@ -3179,6 +3360,30 @@ def message():
         )
 
     provider, model = requested_provider_and_model(payload)
+    model_info = compact_model_info(model)
+
+    conversation = get_conversation(payload.get("chat_id"))
+    if not conversation["messages"] and conversation.get("title") == "New chat":
+        conversation["title"] = title_from_text(user_text)
+    conversation["messages"].append({"role": "user", "content": user_text})
+    touch_conversation(conversation)
+
+    deterministic_assistant = handle_deterministic_message_action(conversation, user_text)
+    if deterministic_assistant is not None:
+        return jsonify(
+            message_response_payload(
+                conversation,
+                deterministic_assistant,
+                provider=provider,
+                model=model,
+                extra={
+                    "response_id": None,
+                    "home_assistant_context": None,
+                    "plot": None,
+                    "sensor_data": None,
+                },
+            )
+        )
 
     key_status_data = provider_key_status()
     provider_status = key_status_data["providers"].get(provider["id"], {})
@@ -3196,13 +3401,6 @@ def message():
         )
         return jsonify(payload), 400
 
-    model_info = compact_model_info(model)
-
-    conversation = get_conversation(payload.get("chat_id"))
-    if not conversation["messages"] and conversation.get("title") == "New chat":
-        conversation["title"] = title_from_text(user_text)
-    conversation["messages"].append({"role": "user", "content": user_text})
-    touch_conversation(conversation)
     plot = safe_build_plot_for_prompt(user_text)
     sensor_data = safe_build_sensor_data_for_prompt(user_text)
     model_input, ha_summary = build_model_input(user_text)

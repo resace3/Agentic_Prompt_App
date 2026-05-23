@@ -1,7 +1,7 @@
 name: Agentic Prompt App
 slug: agentic_prompt_app
 description: Flask prompt conversation app with saved chats, OpenAI/Claude models, mapped Home Assistant history, markdown tables, labeled plots, and read-only sleep summaries
-version: "0.5.13"
+version: "0.5.14"
 arch:
   - aarch64
   - amd64

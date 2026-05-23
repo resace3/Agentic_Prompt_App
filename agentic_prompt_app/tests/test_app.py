@@ -107,6 +107,87 @@ class PromptAppTests(unittest.TestCase):
         self.assertNotIn("scene.awake_light", loaded_sensors)
         self.assertNotIn("scene.pre_awake_light", loaded_sensors)
 
+    def test_sensor_map_add_prompt_requires_confirmation_before_saving(self):
+        class FailingResponses:
+            def create(self, **kwargs):
+                raise AssertionError("Sensor map confirmation flow should not call GPT")
+
+        class FailingClient:
+            responses = FailingResponses()
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FailingClient()
+        try:
+            self.client.put("/api/sensor-map", json={"sensors": []})
+            chat_id = self.client.post("/api/chats").get_json()["active_chat_id"]
+            request_response = self.client.post(
+                "/api/message",
+                json={
+                    "chat_id": chat_id,
+                    "message": (
+                        "I think I have something along the lines of sensor.nick_r_Steps "
+                        "could you add it to the sensor map?"
+                    ),
+                    "provider": "openai",
+                    "model": "gpt-4.1-nano",
+                },
+            )
+            request_data = request_response.get_json()
+
+            self.assertEqual(request_response.status_code, 200)
+            self.assertIn("Do you want me to add it", request_data["assistant"])
+            self.assertEqual(
+                request_data["messages"][-1]["sensor_map_action"]["type"],
+                "add_sensor_map_confirmation_required",
+            )
+            self.assertEqual(self.client.get("/api/sensor-map").get_json()["sensors"], [])
+
+            confirm_response = self.client.post(
+                "/api/message",
+                json={
+                    "chat_id": chat_id,
+                    "message": "yes, add it",
+                    "provider": "openai",
+                    "model": "gpt-4.1-nano",
+                },
+            )
+            confirm_data = confirm_response.get_json()
+        finally:
+            app_module.get_client = original_get_client
+
+        self.assertEqual(confirm_response.status_code, 200)
+        self.assertIn("Added `sensor.nick_r_steps`", confirm_data["assistant"])
+        sensors = self.client.get("/api/sensor-map").get_json()["sensors"]
+        self.assertEqual(sensors[0]["sensor"], "sensor.nick_r_steps")
+        self.assertIn("Step count", sensors[0]["description"])
+
+    def test_app_delete_prompt_requires_manual_home_assistant_action(self):
+        class FailingResponses:
+            def create(self, **kwargs):
+                raise AssertionError("App delete guidance should not call GPT")
+
+        class FailingClient:
+            responses = FailingResponses()
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FailingClient()
+        try:
+            response = self.client.post(
+                "/api/message",
+                json={
+                    "message": "Can you delete this add-on app for me?",
+                    "provider": "openai",
+                    "model": "gpt-4.1-nano",
+                },
+            )
+        finally:
+            app_module.get_client = original_get_client
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("manually in Home Assistant", data["assistant"])
+        self.assertEqual(data["messages"][-1]["manual_action_required"]["type"], "delete_addon")
+
     def test_sleep_entity_discovery_excludes_scenes_from_sensor_map(self):
         original_request = app_module.home_assistant_api_request
         app_module.home_assistant_api_request = lambda path, timeout=30, params=None: [
