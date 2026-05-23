@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -228,14 +229,30 @@ PLOT_REQUEST_TERMS = (
     "plot",
     "graph",
     "chart",
+    "histogram",
+    "scatter",
+    "box plot",
     "trend line",
     "visualize",
     "visualise",
 )
+PLOT_TYPE_ALIASES = {
+    "histogram": ("histogram", "distribution"),
+    "scatter": ("scatter", " vs ", "versus", "relationship between", "correlation"),
+    "box": ("box plot", "boxplot"),
+    "bar": ("bar chart", "bar graph", "bar plot", "bars"),
+    "area": ("area plot", "area chart", "filled area"),
+    "line": ("line plot", "line chart", "line graph", "trend line"),
+}
 MAX_CONTEXT_SLEEP_DAYS = 365
 DEFAULT_SLEEP_DAYS = 30
 WEEK_SLEEP_DAYS = 7
 PREDICTOR_SLEEP_DAYS = 90
+RECORDER_DB_PATHS = (
+    os.environ.get("HA_RECORDER_DB_PATH"),
+    "/config/home-assistant_v2.db",
+    "/data/home-assistant_v2.db",
+)
 SENSOR_DATA_REQUEST_TERMS = (
     "show sensor data",
     "show me sensor data",
@@ -928,6 +945,14 @@ def should_make_plot(user_text):
     return any(term in lowered for term in PLOT_REQUEST_TERMS)
 
 
+def detect_plot_type(user_text):
+    lowered = f" {user_text.lower()} "
+    for plot_type, aliases in PLOT_TYPE_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return plot_type
+    return "line"
+
+
 def should_show_sensor_data(user_text):
     lowered = user_text.lower()
     mapped_history_terms = {"look at", "give me info", "tell me about", "history for", "opened", "closed"}
@@ -1132,6 +1157,77 @@ def history_window(days):
     return start, end
 
 
+def recorder_db_path():
+    for path in RECORDER_DB_PATHS:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def recorder_query_info(entity_ids, days, limit=None):
+    db_path = recorder_db_path()
+    if not db_path:
+        return {
+            "source": "home_assistant_history_api",
+            "path": None,
+            "sql": None,
+            "params_safe": {"entity_ids": entity_ids, "days": days, "limit": limit},
+        }
+
+    return {
+        "source": "home_assistant_recorder_db",
+        "path": db_path,
+        "sql": (
+            "SELECT states.state, states.last_updated_ts "
+            "FROM states JOIN states_meta ON states.metadata_id = states_meta.metadata_id "
+            "WHERE states_meta.entity_id = ? AND states.last_updated_ts >= ? "
+            "AND states.last_updated_ts <= ? ORDER BY states.last_updated_ts"
+        ),
+        "params_safe": {"entity_ids": entity_ids, "days": days, "limit": limit},
+    }
+
+
+def query_entity_history_rows_from_db(entity_id, days, limit=None):
+    path = recorder_db_path()
+    if not path:
+        return None
+
+    start, end = history_window(days)
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        metadata = connection.execute(
+            "SELECT metadata_id FROM states_meta WHERE entity_id = ?",
+            (entity_id,),
+        ).fetchone()
+        if not metadata:
+            return []
+
+        rows = connection.execute(
+            (
+                "SELECT state, last_updated_ts FROM states "
+                "WHERE metadata_id = ? AND last_updated_ts >= ? AND last_updated_ts <= ? "
+                "ORDER BY last_updated_ts"
+            ),
+            (metadata["metadata_id"], start.timestamp(), end.timestamp()),
+        ).fetchall()
+
+    normalized = []
+    for row in rows:
+        if row["last_updated_ts"] is None:
+            continue
+        updated_ts = float(row["last_updated_ts"])
+        normalized.append(
+            {
+                "state": row["state"],
+                "updated_at": datetime.fromtimestamp(updated_ts, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_ts": updated_ts,
+            }
+        )
+    if limit:
+        normalized = normalized[-limit:]
+    return normalized
+
+
 def normalize_history_rows(entity_id, history_payload, limit=None):
     rows = []
     entity_history = []
@@ -1169,6 +1265,10 @@ def normalize_history_rows(entity_id, history_payload, limit=None):
 
 
 def query_entity_history_rows(entity_id, days, limit=None):
+    db_rows = query_entity_history_rows_from_db(entity_id, days, limit=limit)
+    if db_rows is not None:
+        return db_rows
+
     cache_bucket = int(datetime.now(timezone.utc).timestamp() // 30)
     cache_key = (entity_id, int(days), limit, cache_bucket)
     if cache_key in home_assistant_history_cache:
@@ -1204,7 +1304,7 @@ def query_sleep_metric_rows(entity_id, days):
 
 
 def summarize_completed_sleep(days=7):
-    if not home_assistant_token():
+    if not home_assistant_token() and not recorder_db_path():
         return {
             "available": False,
             "source": "home_assistant_api",
@@ -1280,7 +1380,7 @@ def summarize_completed_sleep(days=7):
     if not records:
         return {
             "available": False,
-            "source": "home_assistant_api",
+            "source": recorder_query_info(list(SLEEP_METRIC_ENTITIES.values()), days)["source"],
             "api_url": home_assistant_api_url(),
             "time_zone": time_zone,
             "days_requested": days,
@@ -1303,7 +1403,8 @@ def summarize_completed_sleep(days=7):
 
     return {
         "available": True,
-        "source": "home_assistant_api",
+        "source": recorder_query_info(list(SLEEP_METRIC_ENTITIES.values()), days)["source"],
+        "query": recorder_query_info(list(SLEEP_METRIC_ENTITIES.values()), days),
         "api_url": home_assistant_api_url(),
         "time_zone": time_zone,
         "read_only": True,
@@ -1528,6 +1629,51 @@ def plot_axis_label(plot):
     return "Value"
 
 
+def plot_time_window_label(days):
+    if int(days) == 7:
+        return "past_week"
+    if int(days) == 30:
+        return "past_month"
+    if int(days) == 365:
+        return "past_year"
+    return f"past_{int(days)}_days"
+
+
+def plot_title_for_metric(metric, days, plot_type):
+    label = SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+    window = "Past Week" if int(days) == 7 else "Past Month" if int(days) == 30 else f"Past {int(days)} Days"
+    if plot_type == "histogram":
+        return f"Distribution of {label}"
+    if plot_type == "box":
+        return f"{label} Distribution"
+    return f"{label} Over the {window}"
+
+
+def build_plot_spec(
+    *,
+    plot_type,
+    entity_ids,
+    title,
+    x_label,
+    y_label,
+    days,
+    aggregation="daily",
+    x="date",
+    y="value",
+):
+    return {
+        "plot_type": plot_type,
+        "entity_ids": entity_ids,
+        "x": x,
+        "y": y,
+        "title": title,
+        "x_label": x_label,
+        "y_label": y_label,
+        "time_window": plot_time_window_label(days),
+        "aggregation": aggregation,
+    }
+
+
 def encoded_matplotlib_figure(fig):
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
@@ -1536,65 +1682,104 @@ def encoded_matplotlib_figure(fig):
     return f"data:image/png;base64,{encoded}"
 
 
+def point_datetime(point):
+    if point.get("date"):
+        return datetime.fromisoformat(point["date"]).replace(tzinfo=timezone.utc)
+    return datetime.fromtimestamp(float(point["timestamp"]), timezone.utc)
+
+
+def style_plot_axes(ax, title, x_label, y_label, *, show_grid=True):
+    ax.set_title(title, loc="left", fontsize=15, fontweight="bold", color="#111827", pad=16)
+    ax.set_xlabel(x_label, fontsize=11, fontweight="bold", color="#334155", labelpad=10)
+    ax.set_ylabel(y_label, fontsize=11, fontweight="bold", color="#334155", labelpad=10)
+    if show_grid:
+        ax.grid(True, axis="y", color="#e2e8f0", linewidth=0.9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cbd5e1")
+    ax.spines["bottom"].set_color("#cbd5e1")
+    ax.tick_params(axis="both", colors="#475569", labelsize=9)
+
+
 def render_multi_series_python_plot(plot):
     series = plot.get("series") or []
     series = [item for item in series if item.get("points")]
     if not series:
         return None
 
-    fig, ax_minutes = plt.subplots(figsize=(9.6, 4.8), dpi=140)
+    spec = plot.get("plot_spec") or {}
+    plot_type = spec.get("plot_type") or plot.get("plot_type") or "line"
+    title = spec.get("title") or plot.get("title") or "Sleep Metrics"
+    x_label = spec.get("x_label") or "Date"
+    y_label = spec.get("y_label") or "; ".join(
+        f"{item.get('label')} ({item.get('unit')})" for item in series if item.get("label")
+    )
+
+    fig, ax_minutes = plt.subplots(figsize=(10.6, 5.6), dpi=145)
     fig.patch.set_facecolor("#ffffff")
     ax_minutes.set_facecolor("#ffffff")
+
+    if plot_type == "scatter" and len(series) >= 2:
+        y_series = series[0]
+        x_series = series[1]
+        x_by_date = {point.get("date"): point for point in x_series.get("points", [])}
+        y_by_date = {point.get("date"): point for point in y_series.get("points", [])}
+        common_dates = sorted(set(x_by_date) & set(y_by_date))
+        x_values = [float(x_by_date[date]["value"]) for date in common_dates]
+        y_values = [float(y_by_date[date]["value"]) for date in common_dates]
+        ax_minutes.scatter(x_values, y_values, s=70, color="#2563eb", edgecolor="#1e3a8a", linewidth=0.8)
+        style_plot_axes(ax_minutes, title, x_label, y_label)
+        ax_minutes.grid(True, color="#e2e8f0", linewidth=0.9)
+        stats = f"{len(common_dates)} paired samples | source: {plot.get('source')}"
+        ax_minutes.text(0, -0.22, stats, transform=ax_minutes.transAxes, fontsize=9, color="#64748b", va="top")
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
+        return {
+            "data_url": encoded_matplotlib_figure(fig),
+            "format": "png",
+            "renderer": "matplotlib",
+            "plot_type": plot_type,
+            "x_axis_label": x_label,
+            "y_axis_label": y_label,
+            "title": title,
+            "series_count": len(series),
+        }
+
     axes_by_unit = {"minutes": ax_minutes}
     colors = ["#2563eb", "#dc2626", "#059669", "#7c3aed", "#ea580c"]
+    same_unit = len({item.get("unit") or "value" for item in series}) == 1
 
     for index, item in enumerate(series):
         unit = item.get("unit") or "value"
-        axis = axes_by_unit.get(unit)
+        axis = ax_minutes if same_unit else axes_by_unit.get(unit)
         if axis is None:
             axis = ax_minutes.twinx()
             axes_by_unit[unit] = axis
         points = item["points"]
-        x_values = [datetime.fromtimestamp(float(point["timestamp"]), timezone.utc) for point in points]
+        x_values = [point_datetime(point) for point in points]
         y_values = [float(point["value"]) for point in points]
         color = colors[index % len(colors)]
-        axis.plot(
-            x_values,
-            y_values,
-            linewidth=2.2,
-            marker="o",
-            markersize=4,
-            color=color,
-            label=item.get("label") or item.get("metric") or item.get("sensor"),
-        )
+        label = item.get("label") or item.get("metric") or item.get("sensor")
+        if plot_type == "bar":
+            width = max(0.25, 0.8 / max(1, len(series)))
+            offsets = [(index - (len(series) - 1) / 2) * width for index in range(len(series))]
+            shifted = [value + timedelta(days=offsets[index]) for value in x_values]
+            axis.bar(shifted, y_values, width=width, color=color, alpha=0.82, label=label)
+        elif plot_type == "area":
+            axis.plot(x_values, y_values, linewidth=2.4, color=color, label=label)
+            axis.fill_between(x_values, y_values, min(y_values), color=color, alpha=0.18)
+        else:
+            axis.plot(x_values, y_values, linewidth=2.6, marker="o", markersize=5, color=color, label=label)
         axis.tick_params(axis="y", colors=color, labelsize=8)
-        axis.spines["right" if axis is not ax_minutes else "left"].set_color(color)
+        if axis is not ax_minutes:
+            axis.spines["right"].set_color(color)
 
-    ax_minutes.set_title(
-        plot.get("title") or "Sleep Metrics",
-        loc="left",
-        fontsize=12,
-        fontweight="bold",
-        color="#111827",
-        pad=12,
-    )
-    ax_minutes.set_xlabel("Date", fontsize=10, fontweight="bold", color="#334155")
-    ax_minutes.set_ylabel("Sleep Time (minutes)", fontsize=10, fontweight="bold", color="#2563eb")
-    if "count" in axes_by_unit:
-        axes_by_unit["count"].set_ylabel(
-            "Awakenings (count)",
-            fontsize=10,
-            fontweight="bold",
-            color="#dc2626",
-        )
-    if "percent" in axes_by_unit:
-        axes_by_unit["percent"].set_ylabel("Percent", fontsize=10, fontweight="bold")
+    style_plot_axes(ax_minutes, title, "Date", y_label)
+    for unit, axis in axes_by_unit.items():
+        if axis is not ax_minutes:
+            axis.set_ylabel(unit.title(), fontsize=11, fontweight="bold")
     ax_minutes.grid(True, color="#e2e8f0", linewidth=0.8)
-    ax_minutes.spines["top"].set_visible(False)
-    ax_minutes.spines["bottom"].set_color("#cbd5e1")
-    ax_minutes.tick_params(axis="x", colors="#64748b", labelsize=8)
     ax_minutes.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
-    fig.autofmt_xdate(rotation=30, ha="right")
+    fig.autofmt_xdate(rotation=28, ha="right")
 
     lines = []
     labels = []
@@ -1628,9 +1813,10 @@ def render_multi_series_python_plot(plot):
         "data_url": encoded_matplotlib_figure(fig),
         "format": "png",
         "renderer": "matplotlib",
+        "plot_type": plot_type,
         "x_axis_label": "Date",
         "y_axis_label": y_axis_label,
-        "title": plot.get("title") or "Sleep Metrics",
+        "title": title,
         "series_count": len(series),
     }
 
@@ -1642,29 +1828,47 @@ def render_python_plot(plot):
         return None
 
     points = plot["points"]
-    x_values = [datetime.fromtimestamp(float(point["timestamp"]), timezone.utc) for point in points]
+    spec = plot.get("plot_spec") or {}
+    plot_type = spec.get("plot_type") or plot.get("plot_type") or "line"
+    x_values = [point_datetime(point) for point in points]
     y_values = [float(point["value"]) for point in points]
-    y_label = plot_axis_label(plot)
-    title = plot.get("sensor") or "Sensor plot"
-    if plot.get("cleaned"):
-        title = f"{title} (cleaned completed nights)"
+    y_label = spec.get("y_label") or plot_axis_label(plot)
+    x_label = spec.get("x_label") or "Date"
+    title = spec.get("title") or plot.get("title") or plot.get("sensor") or "Sensor plot"
 
-    fig, ax = plt.subplots(figsize=(8.8, 4.4), dpi=140)
+    fig, ax = plt.subplots(figsize=(10.2, 5.4), dpi=145)
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
-    ax.plot(x_values, y_values, color="#2563eb", linewidth=2.4, marker="o", markersize=4.5)
-    ax.fill_between(x_values, y_values, min(y_values), color="#dbeafe", alpha=0.45)
-    ax.set_title(title, loc="left", fontsize=12, fontweight="bold", color="#111827", pad=12)
-    ax.set_xlabel("Date", fontsize=10, fontweight="bold", color="#334155")
-    ax.set_ylabel(y_label, fontsize=10, fontweight="bold", color="#334155")
-    ax.grid(True, color="#e2e8f0", linewidth=0.8)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color("#cbd5e1")
-    ax.spines["bottom"].set_color("#cbd5e1")
-    ax.tick_params(axis="both", colors="#64748b", labelsize=8)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
-    fig.autofmt_xdate(rotation=30, ha="right")
+    if plot_type == "histogram":
+        bins = min(12, max(5, int(len(y_values) ** 0.5) + 1))
+        ax.hist(y_values, bins=bins, color="#2563eb", edgecolor="#1e3a8a", alpha=0.82)
+        x_label = y_label
+        y_label = "Number of Nights"
+    elif plot_type == "bar":
+        ax.bar(x_values, y_values, width=0.72, color="#2563eb", alpha=0.86)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
+        fig.autofmt_xdate(rotation=28, ha="right")
+    elif plot_type == "box":
+        ax.boxplot(
+            y_values,
+            vert=True,
+            patch_artist=True,
+            labels=[plot.get("label") or plot.get("sensor") or "Values"],
+            boxprops={"facecolor": "#dbeafe", "color": "#2563eb"},
+            medianprops={"color": "#dc2626", "linewidth": 2},
+        )
+        x_label = ""
+    elif plot_type == "area":
+        ax.plot(x_values, y_values, color="#2563eb", linewidth=2.6)
+        ax.fill_between(x_values, y_values, min(y_values), color="#93c5fd", alpha=0.35)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
+        fig.autofmt_xdate(rotation=28, ha="right")
+    else:
+        ax.plot(x_values, y_values, color="#2563eb", linewidth=2.6, marker="o", markersize=5.2)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %-d"))
+        fig.autofmt_xdate(rotation=28, ha="right")
+
+    style_plot_axes(ax, title, x_label, y_label)
 
     stats = (
         f"samples {plot.get('samples')} | min {plot.get('min')} | "
@@ -1685,7 +1889,8 @@ def render_python_plot(plot):
         "data_url": encoded_matplotlib_figure(fig),
         "format": "png",
         "renderer": "matplotlib",
-        "x_axis_label": "Date",
+        "plot_type": plot_type,
+        "x_axis_label": x_label,
         "y_axis_label": y_label,
         "title": title,
     }
@@ -1702,7 +1907,7 @@ def attach_python_plot(plot):
     return plot
 
 
-def query_cleaned_sleep_points(entity_id, days=30):
+def query_cleaned_sleep_points(entity_id, days=30, plot_type="line"):
     metric = sleep_metric_for_entity(entity_id)
     if not metric:
         return None
@@ -1743,11 +1948,24 @@ def query_cleaned_sleep_points(entity_id, days=30):
         }
 
     values = [point["value"] for point in points]
+    label = SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+    unit = SLEEP_PLOT_METRIC_UNITS.get(metric, "value")
+    y_label = f"{label} ({unit})"
+    plot_spec = build_plot_spec(
+        plot_type=plot_type,
+        entity_ids=[entity_id],
+        title=plot_title_for_metric(metric, days, plot_type),
+        x_label="Date",
+        y_label=y_label,
+        days=summary["days_requested"],
+    )
     return {
         "available": True,
         "sensor": entity_id,
-        "label": SLEEP_PLOT_METRIC_LABELS.get(metric, metric.replace("_", " ").title()),
-        "unit": SLEEP_PLOT_METRIC_UNITS.get(metric, "value"),
+        "label": label,
+        "unit": unit,
+        "plot_type": plot_type,
+        "plot_spec": plot_spec,
         "days": summary["days_requested"],
         "points": points,
         "min": round(min(values), 2),
@@ -1757,6 +1975,7 @@ def query_cleaned_sleep_points(entity_id, days=30):
         "samples": len(points),
         "cleaned": True,
         "source": "completed_sleep",
+        "query": summary.get("query") or recorder_query_info([entity_id], days),
         "metric": metric,
         "date_range": summary["date_range"],
     }
@@ -1770,12 +1989,13 @@ def requested_sleep_plot_metrics(user_text):
     metrics = []
     if any(term in lowered for term in ("awakening", "awakenings", "awake count", "wakeup count")):
         metrics.append("awakenings")
-    if any(term in lowered for term in ("sleep time", "sleep duration", "minutes asleep", "time asleep", "asleep")):
-        metrics.append("minutes_asleep")
-    elif "sleep" in lowered:
-        metrics.append("minutes_asleep")
     if "time in bed" in lowered:
         metrics.append("time_in_bed")
+    if any(term in lowered for term in ("sleep time", "sleep duration", "minutes asleep", "time asleep", "asleep")):
+        if "time_in_bed" not in metrics:
+            metrics.append("minutes_asleep")
+    elif "sleep" in lowered and "time_in_bed" not in metrics:
+        metrics.append("minutes_asleep")
     if "efficiency" in lowered:
         metrics.append("efficiency")
     if "minutes awake" in lowered or "awake time" in lowered:
@@ -1788,7 +2008,7 @@ def requested_sleep_plot_metrics(user_text):
     return deduped
 
 
-def build_multi_sleep_plot(metrics, days):
+def build_multi_sleep_plot(metrics, days, plot_type="line"):
     summary = summarize_completed_sleep(days=days)
     if not summary.get("available"):
         return {
@@ -1844,10 +2064,31 @@ def build_multi_sleep_plot(metrics, days):
 
     primary = next((item for item in series if item["metric"] == "minutes_asleep"), series[0])
     title = " and ".join(item["label"] for item in series)
+    entity_ids = [item["sensor"] for item in series]
+    if plot_type == "scatter" and len(series) >= 2:
+        y_series = series[0]
+        x_series = series[1]
+        spec_title = f"{y_series['label']} vs {x_series['label']}"
+        x_label = f"{x_series['label']} ({x_series['unit']})"
+        y_label = f"{y_series['label']} ({y_series['unit']})"
+    else:
+        spec_title = title
+        x_label = "Date"
+        y_label = "; ".join(f"{item['label']} ({item['unit']})" for item in series)
+    plot_spec = build_plot_spec(
+        plot_type=plot_type,
+        entity_ids=entity_ids,
+        title=spec_title,
+        x_label=x_label,
+        y_label=y_label,
+        days=summary["days_requested"],
+    )
     return {
         "available": True,
         "sensor": "sleep_metrics",
-        "title": title,
+        "title": spec_title,
+        "plot_type": plot_type,
+        "plot_spec": plot_spec,
         "days": summary["days_requested"],
         "points": primary["points"],
         "series": series,
@@ -1858,19 +2099,20 @@ def build_multi_sleep_plot(metrics, days):
         "samples": max(item["samples"] for item in series),
         "cleaned": True,
         "source": "completed_sleep",
+        "query": summary.get("query") or recorder_query_info(entity_ids, days),
         "metric": "multi_sleep_metrics",
         "date_range": summary["date_range"],
     }
 
 
-def query_sensor_points(entity_id, days=30, limit=500):
-    if not home_assistant_token():
+def query_sensor_points(entity_id, days=30, limit=500, plot_type="line"):
+    if not home_assistant_token() and not recorder_db_path():
         raise RuntimeError("SUPERVISOR_TOKEN is not available.")
 
     days = max(1, min(int(days), 365))
     limit = max(10, min(int(limit), 2000))
 
-    cleaned_sleep_points = query_cleaned_sleep_points(entity_id, days=days)
+    cleaned_sleep_points = query_cleaned_sleep_points(entity_id, days=days, plot_type=plot_type)
     if cleaned_sleep_points is not None:
         return cleaned_sleep_points
 
@@ -1898,9 +2140,21 @@ def query_sensor_points(entity_id, days=30, limit=500):
         }
 
     values = [point["value"] for point in points]
+    y_label = "Value"
+    plot_spec = build_plot_spec(
+        plot_type=plot_type,
+        entity_ids=[entity_id],
+        title=f"{entity_id} Over {plot_time_window_label(days).replace('_', ' ').title()}",
+        x_label="Date",
+        y_label=y_label,
+        days=days,
+        aggregation="raw_history",
+    )
     return {
         "available": True,
         "sensor": entity_id,
+        "plot_type": plot_type,
+        "plot_spec": plot_spec,
         "days": days,
         "points": points,
         "min": round(min(values), 2),
@@ -1909,7 +2163,8 @@ def query_sensor_points(entity_id, days=30, limit=500):
         "latest": round(values[-1], 2),
         "samples": len(points),
         "cleaned": False,
-        "source": "home_assistant_history_api",
+        "source": recorder_query_info([entity_id], days, limit=limit)["source"],
+        "query": recorder_query_info([entity_id], days, limit=limit),
     }
 
 
@@ -1972,6 +2227,13 @@ def relevant_sensor_map_rows(user_text, max_rows=MAX_CONTEXT_SENSORS):
 
 def prompt_mentions_mapped_sensor(user_text):
     return bool(relevant_sensor_map_rows(user_text, max_rows=1))
+
+
+def prompt_mentions_entity_id(user_text):
+    lowered = user_text.lower()
+    if re.search(r"\b[a-z_]+\.[a-z0-9_]+\b", lowered):
+        return True
+    return any(sensor.lower() in lowered for sensor in sensor_map_entity_ids())
 
 
 def should_include_sleep_context(user_text, mapped_rows=None):
@@ -2237,11 +2499,21 @@ def build_plot_for_prompt(user_text):
         return None
 
     days = requested_days_from_text(user_text)
+    plot_type = detect_plot_type(user_text)
     sleep_metrics = requested_sleep_plot_metrics(user_text)
+    if plot_type == "scatter" and len(sleep_metrics) < 2:
+        if "awakening" in user_text.lower() or "awakenings" in user_text.lower():
+            sleep_metrics = ["awakenings", "minutes_asleep"]
     if len(sleep_metrics) > 1:
-        return attach_python_plot(build_multi_sleep_plot(sleep_metrics, days=days))
+        return attach_python_plot(build_multi_sleep_plot(sleep_metrics, days=days, plot_type=plot_type))
+    if len(sleep_metrics) == 1:
+        sensor = SLEEP_METRIC_ENTITIES[sleep_metrics[0]]
+        return attach_python_plot(query_sensor_points(sensor, days=days, plot_type=plot_type))
 
-    sensor = preferred_plot_sensor(user_text)
+    if plot_type in {"bar", "histogram", "box"} and not prompt_mentions_entity_id(user_text):
+        sensor = SLEEP_METRIC_ENTITIES["minutes_asleep"]
+    else:
+        sensor = preferred_plot_sensor(user_text)
     if not sensor:
         return {
             "available": False,
@@ -2249,7 +2521,7 @@ def build_plot_for_prompt(user_text):
             "points": [],
         }
 
-    return attach_python_plot(query_sensor_points(sensor, days=days))
+    return attach_python_plot(query_sensor_points(sensor, days=days, plot_type=plot_type))
 
 
 def build_sensor_data_for_prompt(user_text):
@@ -2278,6 +2550,8 @@ def plot_context(plot):
     if plot.get("series"):
         summary = {
             "title": plot.get("title"),
+            "plot_spec": plot.get("plot_spec"),
+            "query": plot.get("query"),
             "days": plot["days"],
             "date_range": plot.get("date_range"),
             "series": [
@@ -2297,6 +2571,8 @@ def plot_context(plot):
     else:
         summary = {
             "sensor": plot["sensor"],
+            "plot_spec": plot.get("plot_spec"),
+            "query": plot.get("query"),
             "days": plot["days"],
             "samples": plot["samples"],
             "min": plot["min"],
@@ -2397,10 +2673,10 @@ def build_model_input(user_text):
     prompt = (
         "The user asked this:\n"
         f"{user_text}\n\n"
-        "Read-only Home Assistant API summary follows. Use only this summary; "
-        "do not imply write access. The app calls the Home Assistant REST API through "
-        "the Supervisor token and does not access the SQLite database. If "
-        "mapped_sensor_history is present, it is the queried history API data for "
+    "Read-only Home Assistant API summary follows. Use only this summary; "
+    "do not imply write access. The app calls the Home Assistant REST API through "
+    "the Supervisor token and may read the mapped recorder SQLite database when available. If "
+    "mapped_sensor_history is present, it is the queried history API data for "
         "Sensor Maps entities, so do not say you need "
         "the user to export those same readings. If the user asks for more history, "
         "use the ranges included here.\n"

@@ -857,7 +857,7 @@ class PromptAppTests(unittest.TestCase):
         self.assertLessEqual(data["plot"]["samples"], 7)
         self.assertTrue(data["plot"]["cleaned"])
         self.assertEqual(data["plot"]["python_image"]["renderer"], "matplotlib")
-        self.assertEqual(data["plot"]["python_image"]["y_axis_label"], "Minutes Asleep")
+        self.assertEqual(data["plot"]["python_image"]["y_axis_label"], "Sleep Time (minutes)")
 
     def test_prompt_sensor_data_request_returns_rows(self):
         if not app_module.home_assistant_available():
@@ -918,7 +918,7 @@ class PromptAppTests(unittest.TestCase):
         self.assertNotIn(0, [point["value"] for point in data["points"]])
         self.assertEqual(data["python_image"]["renderer"], "matplotlib")
         self.assertEqual(data["python_image"]["x_axis_label"], "Date")
-        self.assertEqual(data["python_image"]["y_axis_label"], "Minutes Asleep")
+        self.assertEqual(data["python_image"]["y_axis_label"], "Sleep Time (minutes)")
         encoded = data["python_image"]["data_url"].split(",", 1)[1]
         self.assertEqual(base64.b64decode(encoded)[:8], b"\x89PNG\r\n\x1a\n")
 
@@ -935,7 +935,7 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(data["metric"], "efficiency")
         self.assertGreater(len(data["points"]), 0)
         self.assertNotIn(0, [point["value"] for point in data["points"]])
-        self.assertEqual(data["python_image"]["y_axis_label"], "Efficiency")
+        self.assertEqual(data["python_image"]["y_axis_label"], "Sleep Efficiency (percent)")
 
     def test_sensor_data_endpoint_returns_rows(self):
         if not app_module.home_assistant_available():
@@ -1050,7 +1050,7 @@ class PromptAppTests(unittest.TestCase):
             )
             + "samples:2,min:315,max:472,average:393.5,latest:472,date_range:'May 20-21, 2026',"
             + "python_image:{data_url:'data:image/png;base64,abc123',renderer:'matplotlib',"
-            + "x_axis_label:'Date',y_axis_label:'Minutes Asleep',title:'Sleep'},"
+            + "x_axis_label:'Date',y_axis_label:'Sleep Time (minutes)',title:'Sleep'},"
             + "points:[{timestamp:1,value:315,time:'May 20, 2026'},{timestamp:2,value:472,time:'May 21, 2026'}]};"
             + "const card=buildPlotCard(plot);"
             + "function collect(node, out=[]){"
@@ -1073,7 +1073,7 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn('"src":"data:image/png;base64,abc123"', result.stdout)
         self.assertIn('"klass":"python-plot-image"', result.stdout)
         self.assertIn("Rendered with Python (matplotlib)", result.stdout)
-        self.assertIn("Y: Minutes Asleep", result.stdout)
+        self.assertIn("Y: Sleep Time (minutes)", result.stdout)
 
 
 if __name__ == "__main__":
