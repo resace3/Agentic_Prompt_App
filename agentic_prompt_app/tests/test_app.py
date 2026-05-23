@@ -1,8 +1,10 @@
 import base64
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +23,7 @@ class PromptAppTests(unittest.TestCase):
         self.previous_anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
         self.previous_claude_key = os.environ.get("CLAUDE_API_KEY")
         self.previous_secrets_yaml = os.environ.get("SECRETS_YAML")
+        self.previous_recorder_db_path = os.environ.get("HA_RECORDER_DB_PATH")
         os.environ["SENSOR_MAP_PATH"] = os.path.join(self.temp_dir.name, "sensor_map.json")
         os.environ["CHAT_STORE_PATH"] = os.path.join(self.temp_dir.name, "chat_history.json")
         os.environ["OPENAI_API_KEY"] = "test-openai-key"
@@ -56,8 +59,43 @@ class PromptAppTests(unittest.TestCase):
             os.environ.pop("SECRETS_YAML", None)
         else:
             os.environ["SECRETS_YAML"] = self.previous_secrets_yaml
+        if self.previous_recorder_db_path is None:
+            os.environ.pop("HA_RECORDER_DB_PATH", None)
+        else:
+            os.environ["HA_RECORDER_DB_PATH"] = self.previous_recorder_db_path
         app_module.chat_store_loaded_path = None
         self.temp_dir.cleanup()
+
+    def write_fake_recorder_db(self, entities):
+        db_path = os.path.join(self.temp_dir.name, "home-assistant_v2.db")
+        now = datetime.now(timezone.utc)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE states_meta (metadata_id INTEGER PRIMARY KEY, entity_id VARCHAR(255))")
+            connection.execute(
+                """
+                CREATE TABLE states (
+                    state_id INTEGER PRIMARY KEY,
+                    state VARCHAR(255),
+                    last_updated_ts FLOAT,
+                    metadata_id INTEGER
+                )
+                """
+            )
+            state_id = 1
+            for metadata_id, (entity_id, values) in enumerate(entities.items(), start=1):
+                connection.execute(
+                    "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
+                    (metadata_id, entity_id),
+                )
+                for index, value in enumerate(values):
+                    timestamp = (now - timedelta(days=len(values) - index)).timestamp()
+                    connection.execute(
+                        "INSERT INTO states (state_id, state, last_updated_ts, metadata_id) VALUES (?, ?, ?, ?)",
+                        (state_id, str(value), timestamp, metadata_id),
+                    )
+                    state_id += 1
+        os.environ["HA_RECORDER_DB_PATH"] = db_path
+        return db_path
 
     def test_sensor_map_persists_twenty_rows(self):
         rows = [{"sensor": f"sensor.test_{index}", "description": f"Description {index}"} for index in range(20)]
@@ -187,6 +225,91 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("manually in Home Assistant", data["assistant"])
         self.assertEqual(data["messages"][-1]["manual_action_required"]["type"], "delete_addon")
+
+    def test_prompt_context_searches_recorder_db_for_unmapped_steps_sensor(self):
+        self.write_fake_recorder_db(
+            {
+                "sensor.nick_r_steps": [4200, 5100, 6300],
+                "sensor.jelly_star_daily_steps": [2100, 3900, 4400],
+                "sensor.nick_r_sleep_minutes_asleep": [400, 420],
+            }
+        )
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                prompt = kwargs["input"]
+                assert "sensor_catalog_search:" in prompt
+                assert "searched: true" in prompt
+                assert "sensor.nick_r_steps" in prompt
+                assert "sensor.jelly_star_daily_steps" in prompt
+                return SimpleNamespace(
+                    id="resp_test",
+                    output_text="I found sensor.nick_r_steps and sensor.jelly_star_daily_steps in the recorder DB.",
+                )
+
+        class FakeClient:
+            responses = FakeResponses()
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FakeClient()
+        try:
+            response = self.client.post(
+                "/api/message",
+                json={
+                    "message": "I think I have steps data somewhere in my home assistant data, can you find it for me?"
+                },
+            )
+        finally:
+            app_module.get_client = original_get_client
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        matches = data["home_assistant_context"]["sensor_catalog_search"]["matches"]
+        entity_ids = {match["entity_id"] for match in matches}
+        self.assertIn("sensor.nick_r_steps", entity_ids)
+        self.assertIn("sensor.jelly_star_daily_steps", entity_ids)
+
+    def test_prompt_context_searches_recorder_db_for_unmapped_nutribullet_current_sensor(self):
+        self.write_fake_recorder_db(
+            {
+                "sensor.nutribullet_plug_current": [0.0, 1.4, 3.2],
+                "sensor.nutribullet_plug_voltage": [121, 120, 121],
+                "sensor.nutribullet_plug_today_s_consumption": [0.01, 0.03],
+            }
+        )
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                prompt = kwargs["input"]
+                assert "sensor_catalog_search:" in prompt
+                assert "sensor.nutribullet_plug_current" in prompt
+                assert "current" in prompt
+                return SimpleNamespace(
+                    id="resp_test",
+                    output_text="I found sensor.nutribullet_plug_current for NutriBullet current/amps.",
+                )
+
+        class FakeClient:
+            responses = FakeResponses()
+
+        original_get_client = app_module.get_client
+        app_module.get_client = lambda: FakeClient()
+        try:
+            response = self.client.post(
+                "/api/message",
+                json={
+                    "message": (
+                        "I think have a nutribullet sensor which collects amps, could you check my sensors for me"
+                    )
+                },
+            )
+        finally:
+            app_module.get_client = original_get_client
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        matches = data["home_assistant_context"]["sensor_catalog_search"]["matches"]
+        self.assertEqual(matches[0]["entity_id"], "sensor.nutribullet_plug_current")
 
     def test_sleep_entity_discovery_excludes_scenes_from_sensor_map(self):
         original_request = app_module.home_assistant_api_request

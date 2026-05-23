@@ -221,10 +221,86 @@ HA_REQUEST_TERMS = (
     "ha db",
     "ha database",
     "database",
+    "sensor",
+    "sensors",
+    "entity",
+    "entities",
+    "find it",
+    "find them",
+    "search",
+    "check my",
+    "check if",
     "sleep",
     "bed",
     "asleep",
 )
+SENSOR_CATALOG_REQUEST_TERMS = (
+    "sensor",
+    "sensors",
+    "entity",
+    "entities",
+    "home assistant",
+    "database",
+    "db",
+    "data",
+)
+SENSOR_CATALOG_ACTION_TERMS = (
+    "find",
+    "search",
+    "check",
+    "look for",
+    "look up",
+    "do i have",
+    "i have",
+    "somewhere",
+    "anything",
+    "alike",
+    "named",
+    "name",
+)
+SENSOR_SEARCH_STOPWORDS = {
+    "about",
+    "alike",
+    "also",
+    "and",
+    "amps",
+    "anything",
+    "assistant",
+    "check",
+    "collects",
+    "could",
+    "data",
+    "database",
+    "able",
+    "for",
+    "find",
+    "have",
+    "home",
+    "search",
+    "should",
+    "like",
+    "look",
+    "name",
+    "named",
+    "sensor",
+    "sensors",
+    "somewhere",
+    "that",
+    "the",
+    "them",
+    "there",
+    "think",
+    "which",
+    "with",
+    "you",
+}
+SENSOR_SEARCH_SYNONYMS = {
+    "amp": ("amp", "amps", "current", "amperage"),
+    "amps": ("amp", "amps", "current", "amperage"),
+    "amperage": ("amp", "amps", "current", "amperage"),
+    "steps": ("step", "steps", "daily_steps"),
+    "step": ("step", "steps", "daily_steps"),
+}
 PLOT_REQUEST_TERMS = (
     "plot",
     "graph",
@@ -944,6 +1020,38 @@ def should_include_home_assistant_context(user_text):
     return any(term in lowered for term in HA_REQUEST_TERMS)
 
 
+def should_search_sensor_catalog(user_text):
+    lowered = user_text.lower()
+    return any(term in lowered for term in SENSOR_CATALOG_REQUEST_TERMS) and any(
+        term in lowered for term in SENSOR_CATALOG_ACTION_TERMS
+    )
+
+
+def sensor_catalog_search_terms(user_text):
+    lowered = user_text.lower()
+    raw_tokens = [token for token in re.split(r"[^a-z0-9_]+", lowered) if len(token) > 2]
+    terms = []
+    for token in raw_tokens:
+        if token in SENSOR_SEARCH_STOPWORDS:
+            continue
+        terms.append(token)
+        terms.extend(SENSOR_SEARCH_SYNONYMS.get(token, ()))
+
+    if re.search(r"\bamp(s|erage)?\b", lowered):
+        terms.extend(("amp", "amps", "current", "amperage"))
+    if re.search(r"\bstep(s)?\b", lowered):
+        terms.extend(("step", "steps", "daily_steps"))
+
+    deduped = []
+    seen = set()
+    for term in terms:
+        normalized = term.strip().lower()
+        if normalized and normalized not in seen:
+            deduped.append(normalized)
+            seen.add(normalized)
+    return deduped[:12]
+
+
 def should_make_plot(user_text):
     lowered = user_text.lower()
     return any(term in lowered for term in PLOT_REQUEST_TERMS)
@@ -1230,6 +1338,151 @@ def query_entity_history_rows_from_db(entity_id, days, limit=None):
     if limit:
         normalized = normalized[-limit:]
     return normalized
+
+
+def score_entity_candidate(entity_id, friendly_name, terms):
+    searchable = f"{entity_id} {friendly_name or ''}".lower()
+    domain = entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
+    score = 0
+    for term in terms:
+        if not term:
+            continue
+        if term in searchable:
+            score += 4
+        if f"_{term}" in searchable or f"{term}_" in searchable:
+            score += 2
+    if score <= 0:
+        return -1
+    if domain == "sensor":
+        score += 3
+    elif domain in SENSOR_MAP_DISCOVERY_EXCLUDED_DOMAINS:
+        score -= 6
+    return score
+
+
+def recorder_sensor_catalog_matches(terms, limit=12):
+    path = recorder_db_path()
+    if not path or not terms:
+        return []
+
+    patterns = [f"%{term.lower()}%" for term in terms if term]
+    where = " OR ".join(["lower(states_meta.entity_id) LIKE ?"] * len(patterns))
+    if not where:
+        return []
+
+    sql = (
+        "SELECT states_meta.entity_id, COUNT(states.state_id) AS state_rows, "
+        "MAX(states.last_updated_ts) AS latest_updated_ts "
+        "FROM states_meta LEFT JOIN states ON states.metadata_id = states_meta.metadata_id "
+        f"WHERE {where} "
+        "GROUP BY states_meta.entity_id"
+    )
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(sql, patterns).fetchall()
+
+    candidates = []
+    for row in rows:
+        entity_id = row["entity_id"]
+        score = score_entity_candidate(entity_id, "", terms)
+        if score <= 0:
+            continue
+        latest_ts = row["latest_updated_ts"]
+        candidates.append(
+            {
+                "entity_id": entity_id,
+                "source": "home_assistant_recorder_db",
+                "score": score,
+                "state_rows": int(row["state_rows"] or 0),
+                "latest_updated_local": (
+                    local_datetime(float(latest_ts)).strftime("%Y-%m-%d %H:%M:%S") if latest_ts is not None else None
+                ),
+            }
+        )
+
+    candidates.sort(key=lambda item: (-item["score"], item["entity_id"]))
+    return candidates[:limit]
+
+
+def home_assistant_state_catalog_matches(terms, limit=12):
+    if not terms or not home_assistant_token():
+        return []
+    try:
+        states = home_assistant_api_request("states", timeout=30)
+    except Exception:
+        return []
+
+    candidates = []
+    for state in states:
+        entity_id = state.get("entity_id") or ""
+        attributes = state.get("attributes") or {}
+        friendly_name = attributes.get("friendly_name") or ""
+        score = score_entity_candidate(entity_id, friendly_name, terms)
+        if score <= 0:
+            continue
+        candidates.append(
+            {
+                "entity_id": entity_id,
+                "friendly_name": friendly_name,
+                "unit_of_measurement": attributes.get("unit_of_measurement"),
+                "device_class": attributes.get("device_class"),
+                "source": "home_assistant_states_api",
+                "score": score,
+                "latest_state": state.get("state"),
+                "last_updated": state.get("last_updated"),
+            }
+        )
+
+    candidates.sort(key=lambda item: (-item["score"], item["entity_id"]))
+    return candidates[:limit]
+
+
+def discover_sensor_catalog(user_text, limit=12):
+    if not should_search_sensor_catalog(user_text):
+        return {"searched": False, "terms": [], "matches": []}
+
+    terms = sensor_catalog_search_terms(user_text)
+    if not terms:
+        return {
+            "searched": True,
+            "terms": [],
+            "matches": [],
+            "message": "No specific sensor search terms were found in the request.",
+        }
+
+    merged = {}
+    for candidate in [
+        *recorder_sensor_catalog_matches(terms, limit=limit),
+        *home_assistant_state_catalog_matches(terms),
+    ]:
+        entity_id = candidate.get("entity_id")
+        if not entity_id:
+            continue
+        existing = merged.get(entity_id)
+        if not existing or candidate.get("score", 0) > existing.get("score", 0):
+            merged[entity_id] = candidate
+        elif existing:
+            existing["source"] = "home_assistant_recorder_db_and_states_api"
+            for key in ("friendly_name", "unit_of_measurement", "device_class", "latest_state", "last_updated"):
+                if candidate.get(key) is not None:
+                    existing[key] = candidate[key]
+
+    matches = sorted(merged.values(), key=lambda item: (-item.get("score", 0), item.get("entity_id", "")))[:limit]
+    return {
+        "searched": True,
+        "terms": terms,
+        "matches": matches,
+        "query": {
+            "source": "home_assistant_recorder_db_and_states_api",
+            "recorder_db_path": recorder_db_path(),
+            "params_safe": {"terms": terms, "limit": limit},
+        },
+        "message": (
+            f"Found {len(matches)} possible Home Assistant entities matching the request."
+            if matches
+            else "No Home Assistant entities matched the requested sensor terms."
+        ),
+    }
 
 
 def normalize_history_rows(entity_id, history_payload, limit=None):
@@ -2674,6 +2927,7 @@ def sensor_data_context(sensor_data):
 
 def summarize_home_assistant_prompt_context(user_text, days):
     mapped_rows = relevant_sensor_map_rows(user_text)
+    sensor_catalog = discover_sensor_catalog(user_text)
     include_sleep = should_include_sleep_context(user_text, mapped_rows)
     completed_sleep = summarize_completed_sleep(days=days) if include_sleep else None
     mapped_history_rows = mapped_rows
@@ -2708,9 +2962,13 @@ def summarize_home_assistant_prompt_context(user_text, days):
         "time_zone": home_assistant_time_zone(),
         "days_requested": days,
         "sensor_map": load_sensor_map()["sensors"],
+        "sensor_catalog_search": sensor_catalog,
         "completed_sleep": completed_sleep,
         "mapped_sensor_history": mapped_sensor_history,
         "guidance": (
+            "If sensor_catalog_search.searched is true, use its matches to answer "
+            "questions about whether the user has a sensor, even when that sensor is "
+            "not in Sensor Maps yet. Mention exact entity_id values from the matches. "
             "Use mapped_sensor_history for any Sensor Maps entity mentioned by the user, "
             "including non-sleep entities such as doors, lights, motion, plugs, or other "
             "Home Assistant sensors. For sleep questions, use completed_sleep as the "
@@ -2740,6 +2998,8 @@ def build_model_input(user_text):
         "Read-only Home Assistant API summary follows. Use only this summary; "
         "do not imply write access. The app calls the Home Assistant REST API through "
         "the Supervisor token and may read the mapped recorder SQLite database when available. If "
+        "sensor_catalog_search is present and searched=true, it is a read-only search of "
+        "Home Assistant entity metadata/current states; use the exact matching entity_id values. If "
         "mapped_sensor_history is present, it is the queried history API data for "
         "Sensor Maps entities, so do not say you need "
         "the user to export those same readings. If the user asks for more history, "

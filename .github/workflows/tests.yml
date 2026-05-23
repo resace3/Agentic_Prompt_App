@@ -352,15 +352,25 @@ jobs:
                   )
                   """
               )
-              connection.execute(
-                  "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
-                  (1, "sensor.nick_r_steps"),
-              )
-              for index, value in enumerate((4200, 5100, 6300, 5800, 7100, 6900, 7500), start=1):
+              fake_entities = {
+                  "sensor.nick_r_steps": (4200, 5100, 6300, 5800, 7100, 6900, 7500),
+                  "sensor.jelly_star_daily_steps": (2300, 3400, 4100, 3900, 4500, 5200, 6100),
+                  "sensor.nutribullet_plug_current": (0, 0, 1.2, 3.4, 0.5, 0, 0),
+                  "sensor.nutribullet_plug_voltage": (120, 121, 121, 120, 121, 120, 120),
+                  "sensor.nutribullet_plug_today_s_consumption": (0.01, 0.01, 0.04, 0.06, 0.06, 0.07, 0.07),
+              }
+              state_id = 1
+              for metadata_id, (entity_id, values) in enumerate(fake_entities.items(), start=1):
                   connection.execute(
-                      "INSERT INTO states (state_id, state, last_updated_ts, metadata_id) VALUES (?, ?, ?, ?)",
-                      (index, str(value), now - (7 - index) * 86400, 1),
+                      "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
+                      (metadata_id, entity_id),
                   )
+                  for index, value in enumerate(values):
+                      connection.execute(
+                          "INSERT INTO states (state_id, state, last_updated_ts, metadata_id) VALUES (?, ?, ?, ?)",
+                          (state_id, str(value), now - (len(values) - index) * 86400, metadata_id),
+                      )
+                      state_id += 1
           PY
 
           docker exec "$CONTAINER" bash -lc "mkdir -p /mnt/supervisor/homeassistant"
@@ -568,13 +578,29 @@ jobs:
               chat_ids.append(chat['active_chat_id'])
 
           prompts = [
-              'In one short sentence, summarize the fake sleep minutes sensor map entry.',
-              'In one short sentence, explain what fake sleep efficiency could mean.',
-              'In one short sentence, describe what the fake pantry door sensor tracks.',
-              'In one short sentence, describe what fake kitchen motion count tracks.',
+              (
+                  'I think I have steps data somewhere in my home assistant data, can you find it for me?',
+                  ['sensor.nick_r_steps', 'sensor.jelly_star_daily_steps'],
+              ),
+              (
+                  'I think have a nutribullet sensor which collects amps, could you check my sensors for me',
+                  ['sensor.nutribullet_plug_current'],
+              ),
+              (
+                  'In one short sentence, describe what the fake pantry door sensor tracks.',
+                  [],
+              ),
+              (
+                  'In one short sentence, describe what fake kitchen motion count tracks.',
+                  [],
+              ),
           ]
-          for chat_id, prompt in zip(chat_ids, prompts):
-              send_gpt_prompt(chat_id, prompt)
+          for chat_id, (prompt, expected_entities) in zip(chat_ids, prompts):
+              data = send_gpt_prompt(chat_id, prompt)
+              catalog = (data.get('home_assistant_context') or {}).get('sensor_catalog_search') or {}
+              matches = {row.get('entity_id') for row in catalog.get('matches', [])}
+              for entity_id in expected_entities:
+                  assert_ok(entity_id in matches, {'expected': entity_id, 'matches': sorted(matches), 'prompt': prompt})
 
           assert_ok(gpt_call_count == 4, f'Expected exactly 4 GPT calls, got {gpt_call_count}')
 
