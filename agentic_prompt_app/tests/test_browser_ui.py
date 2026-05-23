@@ -178,7 +178,10 @@ def test_prompt_composer_stays_visible_in_short_and_zoom_like_viewports(page):
     for size in (
         {"width": 950, "height": 620},
         {"width": 950, "height": 413},
+        {"width": 950, "height": 320},
         {"width": 633, "height": 413},
+        {"width": 633, "height": 320},
+        {"width": 390, "height": 320},
         {"width": 390, "height": 460},
     ):
         page.set_viewport_size(size)
