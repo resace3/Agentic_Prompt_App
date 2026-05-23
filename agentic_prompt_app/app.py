@@ -3487,11 +3487,25 @@ def plot_context(plot):
 def analysis_visuals_context(analysis_visuals):
     if not analysis_visuals:
         return ""
+    artifacts = [
+        {
+            "type": artifact.get("type"),
+            "title": artifact.get("title"),
+            "description": artifact.get("description"),
+        }
+        for artifact in analysis_visuals.get("artifacts", [])
+    ]
     return (
         "\nThe app rendered visual artifacts for this response: an N-of-1 association plot, "
         "causal DAG SVG diagrams, and LaTeX equation cards. Do not describe non-existent "
         "attachments or ask the user to use a notebook. Refer to the rendered cards below "
-        "the message and summarize what each visual shows.\n"
+        "the message and summarize what each visual shows. The N-of-1 Association Plot is "
+        "a horizontal bar chart of ranked Pearson r values for same-day and prior-day "
+        "associations with completed minutes asleep; it is not a time-series plot of daily "
+        "sleep minutes. The DAG cards are conceptual causal diagrams, not estimated causal "
+        "effects. The LaTeX cards show the formulas used for correlation, slope, and lag "
+        "alignment. Keep the text description consistent with these rendered artifacts:\n"
+        f"{yaml.safe_dump(artifacts, sort_keys=False)}"
     )
 
 
