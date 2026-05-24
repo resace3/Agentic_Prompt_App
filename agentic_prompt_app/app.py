@@ -15,7 +15,7 @@ import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from math import sqrt
+from math import isfinite, sqrt
 from pathlib import Path
 
 import matplotlib
@@ -1320,6 +1320,10 @@ def recorder_db_path():
     return None
 
 
+def connect_recorder_db(path):
+    return sqlite3.connect(f"{Path(path).absolute().as_uri()}?mode=ro", uri=True)
+
+
 def recorder_query_info(entity_ids, days, limit=None):
     db_path = recorder_db_path()
     if not db_path:
@@ -1343,13 +1347,35 @@ def recorder_query_info(entity_ids, days, limit=None):
     }
 
 
+def parse_recorder_timestamp(value):
+    if value is None:
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(timestamp):
+        return None
+    return timestamp
+
+
+def parse_recorder_datetime(value):
+    timestamp = parse_recorder_timestamp(value)
+    if timestamp is None:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 def query_entity_history_rows_from_db(entity_id, days, limit=None):
     path = recorder_db_path()
     if not path:
         return None
 
     start, end = history_window(days)
-    with sqlite3.connect(path) as connection:
+    with connect_recorder_db(path) as connection:
         connection.row_factory = sqlite3.Row
         metadata = connection.execute(
             "SELECT metadata_id FROM states_meta WHERE entity_id = ?",
@@ -1369,14 +1395,14 @@ def query_entity_history_rows_from_db(entity_id, days, limit=None):
 
     normalized = []
     for row in rows:
-        if row["last_updated_ts"] is None:
+        updated_at = parse_recorder_datetime(row["last_updated_ts"])
+        if updated_at is None:
             continue
-        updated_ts = float(row["last_updated_ts"])
         normalized.append(
             {
                 "state": row["state"],
-                "updated_at": datetime.fromtimestamp(updated_ts, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "updated_ts": updated_ts,
+                "updated_at": updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_ts": updated_at.timestamp(),
             }
         )
     if limit:
@@ -1421,7 +1447,7 @@ def recorder_sensor_catalog_matches(terms, limit=12):
         f"WHERE {where} "
         "GROUP BY states_meta.entity_id"
     )
-    with sqlite3.connect(path) as connection:
+    with connect_recorder_db(path) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(sql, patterns).fetchall()
 
@@ -1431,16 +1457,16 @@ def recorder_sensor_catalog_matches(terms, limit=12):
         score = score_entity_candidate(entity_id, "", terms)
         if score <= 0:
             continue
-        latest_ts = row["latest_updated_ts"]
+        latest_at = parse_recorder_datetime(row["latest_updated_ts"])
         candidates.append(
             {
                 "entity_id": entity_id,
                 "source": "home_assistant_recorder_db",
                 "score": score,
                 "state_rows": int(row["state_rows"] or 0),
-                "latest_updated_local": (
-                    local_datetime(float(latest_ts)).strftime("%Y-%m-%d %H:%M:%S") if latest_ts is not None else None
-                ),
+                "latest_updated_local": local_datetime(latest_at.timestamp()).strftime("%Y-%m-%d %H:%M:%S")
+                if latest_at is not None
+                else None,
             }
         )
 

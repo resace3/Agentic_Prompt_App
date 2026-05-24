@@ -1,0 +1,259 @@
+name: Backend API
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-api:
+    name: Backend API contract
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}/agentic_prompt_app
+      CHAT_STORE_PATH: /tmp/agentic-backend-api/chat_history.json
+      SENSOR_MAP_PATH: /tmp/agentic-backend-api/sensor_map.json
+      SECRETS_YAML: /tmp/agentic-backend-api/secrets.yaml
+      FLASK_SECRET_KEY: backend-api-ci-flask-secret
+      OPENAI_API_KEY: backend-openai-secret-should-not-print
+      ANTHROPIC_API_KEY: backend-anthropic-secret-should-not-print
+
+    defaults:
+      run:
+        working-directory: agentic_prompt_app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare isolated CI state
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$CHAT_STORE_PATH")"
+          printf '{"sensors":[]}\n' > "$SENSOR_MAP_PATH"
+          {
+            printf 'openai_api_key: %s\n' "$OPENAI_API_KEY"
+            printf 'claude_api_key: %s\n' "$ANTHROPIC_API_KEY"
+          } > "$SECRETS_YAML"
+          chmod 600 "$SECRETS_YAML"
+          echo "::add-mask::$OPENAI_API_KEY"
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+
+      - name: Start backend
+        # Verifies that the Flask backend can boot using only temp CI state.
+        # Provider traffic is pointed at a closed local proxy so this workflow
+        # cannot make live OpenAI or Anthropic calls if a deterministic prompt
+        # path regresses unexpectedly.
+        run: |
+          set -euo pipefail
+          export NO_PROXY="127.0.0.1,localhost"
+          export no_proxy="$NO_PROXY"
+          export HTTP_PROXY="http://127.0.0.1:9"
+          export HTTPS_PROXY="$HTTP_PROXY"
+          python -m flask --app app run --host 127.0.0.1 --port 5056 > "$RUNNER_TEMP/backend-api.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/backend-api.pid"
+
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:5056/api/health > /dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+
+          echo "Backend did not become ready"
+          cat "$RUNNER_TEMP/backend-api.log" || true
+          exit 1
+
+      - name: Probe backend API contracts
+        # Verifies JSON-only API behavior, valid deterministic prompt handling,
+        # clean structured errors, and long-prompt rejection without provider calls.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          BASE_URL = "http://127.0.0.1:5056"
+          SENTINELS = [
+              os.environ["OPENAI_API_KEY"],
+              os.environ["ANTHROPIC_API_KEY"],
+          ]
+
+
+          def request_json(path, *, method="GET", payload=None, expected_status=200):
+              body = None
+              headers = {"Accept": "application/json"}
+              if payload is not None:
+                  body = json.dumps(payload).encode("utf-8")
+                  headers["Content-Type"] = "application/json"
+              request = urllib.request.Request(
+                  f"{BASE_URL}{path}",
+                  data=body,
+                  method=method,
+                  headers=headers,
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      status = response.status
+                      content_type = response.headers.get("content-type", "")
+                      raw = response.read().decode("utf-8")
+              except urllib.error.HTTPError as exc:
+                  status = exc.code
+                  content_type = exc.headers.get("content-type", "")
+                  raw = exc.read().decode("utf-8")
+
+              assert status == expected_status, {
+                  "path": path,
+                  "expected_status": expected_status,
+                  "actual_status": status,
+                  "raw": raw[:1000],
+              }
+              assert "application/json" in content_type, {
+                  "path": path,
+                  "content_type": content_type,
+                  "raw": raw[:1000],
+              }
+              data = json.loads(raw)
+              rendered = json.dumps(data, sort_keys=True)
+              for sentinel in SENTINELS:
+                  assert sentinel not in rendered, f"secret sentinel leaked in response for {path}"
+              return data
+
+
+          def assert_error_shape(data, expected_error_type):
+              assert data.get("ok") is False, data
+              assert data.get("error_type") == expected_error_type, data
+              assert isinstance(data.get("message"), str) and data["message"], data
+              assert isinstance(data.get("fix_steps"), list), data
+              assert isinstance(data.get("details_safe"), dict), data
+
+
+          health = request_json("/api/health")
+          assert health["ok"] is True, health
+          assert "key_status" in health and isinstance(health["key_status"], dict), health
+
+          config_status = request_json("/api/config-status")
+          assert isinstance(config_status.get("checks"), list), config_status
+
+          diagnostics = request_json("/api/diagnostics")
+          assert isinstance(diagnostics.get("checks"), list), diagnostics
+
+          chat = request_json("/api/chats", method="POST", expected_status=201)
+          chat_id = chat["active_chat_id"]
+          valid_prompt = request_json(
+              "/api/message",
+              method="POST",
+              payload={
+                  "chat_id": chat_id,
+                  "message": "I think I have sensor.nick_r_steps. Can you add it to the sensor map?",
+                  "provider": "openai",
+                  "model": "gpt-4.1-nano",
+              },
+          )
+          assert valid_prompt["active_chat_id"] == chat_id, valid_prompt
+          assert "Do you want me to add it" in valid_prompt.get("assistant", ""), valid_prompt
+          assert valid_prompt["messages"][-1]["sensor_map_action"]["type"] == "add_sensor_map_confirmation_required"
+
+          cancel_prompt = request_json(
+              "/api/message",
+              method="POST",
+              payload={
+                  "chat_id": chat_id,
+                  "message": "no",
+                  "provider": "openai",
+                  "model": "gpt-4.1-nano",
+              },
+          )
+          assert "did not add" in cancel_prompt.get("assistant", "").lower(), cancel_prompt
+
+          empty_prompt = request_json(
+              "/api/message",
+              method="POST",
+              payload={"message": ""},
+              expected_status=400,
+          )
+          assert_error_shape(empty_prompt, "empty_prompt")
+
+          unknown_provider = request_json(
+              "/api/message",
+              method="POST",
+              payload={"message": "hello", "provider": "not-a-provider"},
+              expected_status=400,
+          )
+          assert_error_shape(unknown_provider, "unknown_provider")
+
+          model_mismatch = request_json(
+              "/api/message",
+              method="POST",
+              payload={
+                  "message": "hello",
+                  "provider": "anthropic",
+                  "model": "gpt-4.1-nano",
+              },
+              expected_status=400,
+          )
+          assert_error_shape(model_mismatch, "provider_model_mismatch")
+
+          oversized_prompt = request_json(
+              "/api/message",
+              method="POST",
+              payload={"message": "x" * 20001},
+              expected_status=413,
+          )
+          assert_error_shape(oversized_prompt, "prompt_too_large")
+          assert oversized_prompt["details_safe"]["received_chars"] == 20001, oversized_prompt
+
+          missing_route = request_json("/api/not-a-real-route", expected_status=404)
+          assert_error_shape(missing_route, "http_404")
+
+          missing_sensor = request_json("/api/sensor-plot", expected_status=400)
+          assert_error_shape(missing_sensor, "missing_sensor")
+          PY
+
+      - name: Check backend logs for secret leakage
+        # Verifies fake API key sentinels never appear in Flask logs.
+        if: always()
+        run: |
+          set -euo pipefail
+          if grep -Fq "$OPENAI_API_KEY" "$RUNNER_TEMP/backend-api.log"; then
+            echo "OpenAI secret sentinel leaked to backend logs"
+            exit 1
+          fi
+          if grep -Fq "$ANTHROPIC_API_KEY" "$RUNNER_TEMP/backend-api.log"; then
+            echo "Anthropic secret sentinel leaked to backend logs"
+            exit 1
+          fi
+
+      - name: Stop backend
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/backend-api.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/backend-api.pid")" || true
+            wait "$(cat "$RUNNER_TEMP/backend-api.pid")" || true
+          fi
+
+      - name: Upload backend log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-api-log
+          path: ${{ runner.temp }}/backend-api.log
+          if-no-files-found: ignore

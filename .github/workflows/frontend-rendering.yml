@@ -1,0 +1,110 @@
+name: Frontend Rendering
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "agentic_prompt_app/app.py"
+      - "agentic_prompt_app/templates/**"
+      - "agentic_prompt_app/static/**"
+      - "agentic_prompt_app/tests/test_browser_ui.py"
+      - "agentic_prompt_app/requirements.txt"
+      - ".github/workflows/frontend-rendering.yml"
+  pull_request:
+    paths:
+      - "agentic_prompt_app/app.py"
+      - "agentic_prompt_app/templates/**"
+      - "agentic_prompt_app/static/**"
+      - "agentic_prompt_app/tests/test_browser_ui.py"
+      - "agentic_prompt_app/requirements.txt"
+      - ".github/workflows/frontend-rendering.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-rendering-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playwright-rendering:
+    name: Playwright layout and overflow checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}/agentic_prompt_app
+      RUN_BROWSER_TESTS: "1"
+      BROWSER_BASE_URL: http://127.0.0.1:5056
+      CHAT_STORE_PATH: /tmp/agentic-frontend-rendering/chat_history.json
+      SENSOR_MAP_PATH: /tmp/agentic-frontend-rendering/sensor_map.json
+      SECRETS_YAML: /tmp/agentic-frontend-rendering/secrets.yaml
+      PLAYWRIGHT_ARTIFACTS: /tmp/agentic-frontend-rendering/artifacts
+    defaults:
+      run:
+        working-directory: agentic_prompt_app
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: agentic_prompt_app/requirements.txt
+
+      - name: Install app and browser test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-playwright playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run frontend rendering regression suite
+        run: |
+          set -euo pipefail
+          mkdir -p "$PLAYWRIGHT_ARTIFACTS"
+          : > "$SECRETS_YAML"
+
+          # This workflow verifies the browser-facing Home Assistant ingress layout:
+          # - app shell loads with CSS/JS
+          # - tab buttons stay compact when switching tabs and resizing
+          # - the prompt composer remains visible in short, narrow, and zoom-like viewports
+          # - generated plots, DAG SVGs, Markdown, tables, code, and LaTeX stay inside response cards
+          python -m flask --app app run --host 127.0.0.1 --port 5056 > "$PLAYWRIGHT_ARTIFACTS/flask.log" 2>&1 &
+          FLASK_PID=$!
+          cleanup() {
+            kill "$FLASK_PID" || true
+            wait "$FLASK_PID" || true
+          }
+          trap cleanup EXIT
+
+          for i in {1..30}; do
+            if curl -sSf "$BROWSER_BASE_URL/api/health" > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -sSf "$BROWSER_BASE_URL/api/health" > /dev/null; then
+            echo "Flask app did not become ready for frontend rendering checks"
+            cat "$PLAYWRIGHT_ARTIFACTS/flask.log" || true
+            exit 1
+          fi
+
+          curl -sSf "$BROWSER_BASE_URL/static/styles.css" > /dev/null
+          curl -sSf "$BROWSER_BASE_URL/static/app.js" > /dev/null
+
+          pytest tests/test_browser_ui.py -q \
+            --screenshot=only-on-failure \
+            --tracing=retain-on-failure \
+            --output="$PLAYWRIGHT_ARTIFACTS"
+
+      - name: Upload rendering failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-rendering-artifacts
+          path: ${{ runner.temp }}/frontend-rendering-artifacts
+          if-no-files-found: ignore
