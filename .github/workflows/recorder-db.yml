@@ -1,0 +1,246 @@
+name: Recorder DB
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recorder-db:
+    name: Fake Home Assistant recorder SQLite checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}/agentic_prompt_app
+      MPLBACKEND: Agg
+    defaults:
+      run:
+        working-directory: agentic_prompt_app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install app dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify recorder DB query behavior with fake Home Assistant data
+        run: |
+          python - <<'PY'
+          # This job validates the app's Home Assistant recorder SQLite paths
+          # without requiring a live Supervisor or a real /config database.
+          import os
+          import sqlite3
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          db_dir = runner_temp / "readonly-recorder"
+          state_dir = runner_temp / "recorder-app-state"
+          db_dir.mkdir(parents=True, exist_ok=True)
+          state_dir.mkdir(parents=True, exist_ok=True)
+          db_path = db_dir / "home-assistant_v2.db"
+          if db_path.exists():
+            db_path.unlink()
+
+          now = datetime.now(timezone.utc).replace(microsecond=0)
+          metadata_id = 1
+          state_id = 1
+
+          def timestamp(days_ago=0, hours_ago=0, minutes_ago=0):
+            return (now - timedelta(days=days_ago, hours=hours_ago, minutes=minutes_ago)).timestamp()
+
+          with sqlite3.connect(db_path) as connection:
+            connection.execute(
+              "CREATE TABLE states_meta (metadata_id INTEGER PRIMARY KEY, entity_id VARCHAR(255))"
+            )
+            connection.execute(
+              """
+              CREATE TABLE states (
+                state_id INTEGER PRIMARY KEY,
+                state VARCHAR(255),
+                last_updated_ts FLOAT,
+                metadata_id INTEGER
+              )
+              """
+            )
+
+            def add_entity(entity_id, rows):
+              global metadata_id, state_id
+              connection.execute(
+                "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
+                (metadata_id, entity_id),
+              )
+              current_metadata_id = metadata_id
+              metadata_id += 1
+              for state, updated_ts in rows:
+                connection.execute(
+                  "INSERT INTO states (state_id, state, last_updated_ts, metadata_id) VALUES (?, ?, ?, ?)",
+                  (state_id, str(state), updated_ts, current_metadata_id),
+                )
+                state_id += 1
+
+            sleep_rows = list(range(14))
+            add_entity(
+              "sensor.nick_r_sleep_minutes_asleep",
+              [(390 + index * 5, timestamp(days_ago=13 - index, hours_ago=6)) for index in sleep_rows],
+            )
+            add_entity(
+              "sensor.nick_r_sleep_time_in_bed",
+              [(430 + index * 5, timestamp(days_ago=13 - index, hours_ago=6)) for index in sleep_rows],
+            )
+            add_entity(
+              "sensor.nick_r_sleep_minutes_awake",
+              [(40 + (index % 3), timestamp(days_ago=13 - index, hours_ago=6)) for index in sleep_rows],
+            )
+            add_entity(
+              "sensor.nick_r_sleep_efficiency",
+              [(88 + (index % 8), timestamp(days_ago=13 - index, hours_ago=6)) for index in sleep_rows],
+            )
+            add_entity(
+              "sensor.nick_r_awakenings_count",
+              [(1 + (index % 4), timestamp(days_ago=13 - index, hours_ago=6)) for index in sleep_rows],
+            )
+            add_entity(
+              "sensor.nick_r_sleep_start_time",
+              [("23:15", timestamp(days_ago=13 - index, hours_ago=6)) for index in sleep_rows],
+            )
+
+            # Malformed recorder timestamps should be ignored, not crash DB-backed query paths.
+            add_entity(
+              "sensor.malformed_timestamp",
+              [
+                ("999", "not-a-timestamp"),
+                ("777", 10 ** 20),
+                ("888", None),
+                ("333", timestamp(hours_ago=2)),
+              ],
+            )
+
+            # Larger data volume catches unstable limits, sorting, and numeric parsing behavior.
+            add_entity(
+              "sensor.large_simulated_load",
+              [
+                (round(70 + (index % 17) * 0.25, 2), timestamp(minutes_ago=30 * (2499 - index)))
+                for index in range(2500)
+              ],
+            )
+
+          def table_counts():
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+              return {
+                "states_meta": connection.execute("SELECT COUNT(*) FROM states_meta").fetchone()[0],
+                "states": connection.execute("SELECT COUNT(*) FROM states").fetchone()[0],
+              }
+
+          counts_before = table_counts()
+
+          # The app should be able to read a recorder DB mounted read-only, as HA add-ons
+          # should treat /config/home-assistant_v2.db as an input data source.
+          db_path.chmod(0o444)
+          db_dir.chmod(0o555)
+          try:
+            with sqlite3.connect(db_path) as connection:
+              connection.execute(
+                "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
+                (9999, "sensor.should_not_write"),
+              )
+              connection.commit()
+            raise AssertionError("Fake recorder DB unexpectedly accepted writes after chmod 0444")
+          except sqlite3.OperationalError:
+            pass
+
+          os.environ["HA_RECORDER_DB_PATH"] = str(db_path)
+          os.environ["SENSOR_MAP_PATH"] = str(state_dir / "sensor_map.json")
+          os.environ["CHAT_STORE_PATH"] = str(state_dir / "chat_history.json")
+          os.environ["SECRETS_YAML"] = str(state_dir / "missing-secrets.yaml")
+          os.environ.pop("SUPERVISOR_TOKEN", None)
+
+          import app as app_module
+
+          assert app_module.recorder_db_path() == str(db_path)
+          assert app_module.parse_recorder_timestamp("not-a-timestamp") is None
+          assert app_module.parse_recorder_timestamp(float("inf")) is None
+          assert app_module.parse_recorder_datetime(10 ** 20) is None
+          try:
+            with app_module.connect_recorder_db(str(db_path)) as connection:
+              connection.execute(
+                "INSERT INTO states_meta (metadata_id, entity_id) VALUES (?, ?)",
+                (9998, "sensor.app_should_not_write"),
+              )
+            raise AssertionError("App recorder DB connection unexpectedly accepted writes")
+          except sqlite3.OperationalError:
+            pass
+
+          query_info = app_module.recorder_query_info(["sensor.nick_r_sleep_time_in_bed"], days=14)
+          assert query_info["source"] == "home_assistant_recorder_db", query_info
+          assert "states_meta" in query_info["sql"], query_info
+
+          sleep_summary = app_module.summarize_completed_sleep(days=14)
+          assert sleep_summary["available"], sleep_summary
+          assert sleep_summary["read_only"] is True, sleep_summary
+          assert sleep_summary["days_returned"] == 14, sleep_summary
+          assert sleep_summary["source_sensors"]["time_in_bed"] == "sensor.nick_r_sleep_time_in_bed"
+
+          sleep_history = app_module.query_sensor_history("sensor.nick_r_sleep_time_in_bed", days=14, limit=50)
+          assert sleep_history["available"], sleep_history
+          assert sleep_history["samples"] == 14, sleep_history
+          assert sleep_history["numeric_summary"]["latest"] == 495, sleep_history
+
+          sleep_plot = app_module.query_sensor_points("sensor.nick_r_sleep_time_in_bed", days=14, limit=50)
+          assert sleep_plot["available"], sleep_plot
+          assert sleep_plot["source"] == "completed_sleep", sleep_plot
+          assert sleep_plot["metric"] == "time_in_bed", sleep_plot
+          assert sleep_plot["samples"] == 14, sleep_plot
+          assert sleep_plot["points"][-1]["value"] == 495, sleep_plot
+
+          missing_history = app_module.query_sensor_history("sensor.missing_entity", days=14)
+          assert missing_history["available"] is False, missing_history
+          assert missing_history["samples"] == 0, missing_history
+          assert "No sensor history" in missing_history["message"], missing_history
+
+          missing_plot = app_module.query_sensor_points("sensor.missing_entity", days=14)
+          assert missing_plot["available"] is False, missing_plot
+          assert missing_plot["points"] == [], missing_plot
+
+          malformed_history = app_module.query_sensor_history("sensor.malformed_timestamp", days=30)
+          assert malformed_history["available"], malformed_history
+          assert malformed_history["samples"] == 1, malformed_history
+          assert malformed_history["rows"][0]["state"] == "333", malformed_history
+
+          large_plot = app_module.query_sensor_points("sensor.large_simulated_load", days=90, limit=2000)
+          assert large_plot["available"], large_plot
+          assert large_plot["source"] == "home_assistant_recorder_db", large_plot
+          assert large_plot["samples"] == 2000, large_plot
+          assert large_plot["query"]["source"] == "home_assistant_recorder_db", large_plot
+
+          large_feature = app_module.sensor_daily_feature(
+            {"sensor": "sensor.large_simulated_load", "description": "Large fake numeric sensor."},
+            days=90,
+          )
+          assert large_feature["available"], large_feature
+          assert large_feature["feature"] == "daily_mean", large_feature
+          assert large_feature["samples"] >= 2, large_feature
+
+          counts_after = table_counts()
+          assert counts_after == counts_before, (counts_before, counts_after)
+
+          print(
+            "Recorder DB checks passed:",
+            {
+              "sleep_days": sleep_summary["days_returned"],
+              "large_samples": large_plot["samples"],
+              "malformed_rows_used": malformed_history["samples"],
+              "db_counts": counts_after,
+            },
+          )
+          PY
