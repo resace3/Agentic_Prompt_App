@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}/agentic_prompt_app
-      CHAT_STORE_PATH: ${{ runner.temp }}/agentic-backend-api/chat_history.json
-      SENSOR_MAP_PATH: ${{ runner.temp }}/agentic-backend-api/sensor_map.json
-      SECRETS_YAML: ${{ runner.temp }}/agentic-backend-api/secrets.yaml
+      CHAT_STORE_PATH: /tmp/agentic-backend-api/chat_history.json
+      SENSOR_MAP_PATH: /tmp/agentic-backend-api/sensor_map.json
+      SECRETS_YAML: /tmp/agentic-backend-api/secrets.yaml
       FLASK_SECRET_KEY: backend-api-ci-flask-secret
       OPENAI_API_KEY: backend-openai-secret-should-not-print
       ANTHROPIC_API_KEY: backend-anthropic-secret-should-not-print

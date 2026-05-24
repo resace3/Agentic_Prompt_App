@@ -36,10 +36,10 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/agentic_prompt_app
       RUN_BROWSER_TESTS: "1"
       BROWSER_BASE_URL: http://127.0.0.1:5056
-      CHAT_STORE_PATH: ${{ runner.temp }}/chat_history.json
-      SENSOR_MAP_PATH: ${{ runner.temp }}/sensor_map.json
-      SECRETS_YAML: ${{ runner.temp }}/secrets.yaml
-      PLAYWRIGHT_ARTIFACTS: ${{ runner.temp }}/frontend-rendering-artifacts
+      CHAT_STORE_PATH: /tmp/agentic-frontend-rendering/chat_history.json
+      SENSOR_MAP_PATH: /tmp/agentic-frontend-rendering/sensor_map.json
+      SECRETS_YAML: /tmp/agentic-frontend-rendering/secrets.yaml
+      PLAYWRIGHT_ARTIFACTS: /tmp/agentic-frontend-rendering/artifacts
     defaults:
       run:
         working-directory: agentic_prompt_app

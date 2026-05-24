@@ -1464,7 +1464,7 @@ def recorder_sensor_catalog_matches(terms, limit=12):
                 "source": "home_assistant_recorder_db",
                 "score": score,
                 "state_rows": int(row["state_rows"] or 0),
-                "latest_updated_local": local_datetime(latest_at).strftime("%Y-%m-%d %H:%M:%S")
+                "latest_updated_local": local_datetime(latest_at.timestamp()).strftime("%Y-%m-%d %H:%M:%S")
                 if latest_at is not None
                 else None,
             }

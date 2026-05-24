@@ -120,7 +120,7 @@ jobs:
               "sensor.malformed_timestamp",
               [
                 ("999", "not-a-timestamp"),
-                ("777", 10 ** 20),
+                ("777", 1.0e20),
                 ("888", None),
                 ("333", timestamp(hours_ago=2)),
               ],
