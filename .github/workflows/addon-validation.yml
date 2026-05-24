@@ -1,0 +1,199 @@
+name: Add-on Validation
+
+on:
+  push:
+    paths:
+      - ".github/workflows/addon-validation.yml"
+      - "agentic_prompt_app/**"
+      - "repository.yaml"
+  pull_request:
+    paths:
+      - ".github/workflows/addon-validation.yml"
+      - "agentic_prompt_app/**"
+      - "repository.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-addon:
+    name: Validate Home Assistant add-on package
+    runs-on: ubuntu-latest
+    env:
+      ADDON_DIR: agentic_prompt_app
+      IMAGE_NAME: agentic-prompt-app-addon-validation:ci
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install manifest parser
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+
+      - name: Validate add-on files and metadata
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+          from pathlib import Path
+
+          import yaml
+
+          addon_dir = Path(os.environ["ADDON_DIR"])
+          repository_path = Path("repository.yaml")
+          config_path = addon_dir / "config.yaml"
+          options_path = addon_dir / "options.json"
+
+          # These files/directories are required for the add-on to be installable
+          # and to serve the Flask ingress UI from the built container.
+          required_paths = [
+              "config.yaml",
+              "build.yaml",
+              "Dockerfile",
+              "run.sh",
+              "app.py",
+              "requirements.txt",
+              "templates",
+              "static",
+          ]
+          missing = [path for path in required_paths if not (addon_dir / path).exists()]
+          if missing:
+              raise SystemExit(f"Missing required add-on paths: {', '.join(missing)}")
+          if not repository_path.exists():
+              raise SystemExit("Missing repository.yaml at the repository root")
+
+          with repository_path.open("r", encoding="utf-8") as repository_file:
+              repository = yaml.safe_load(repository_file)
+          if not isinstance(repository, dict):
+              raise SystemExit("repository.yaml must parse to a YAML mapping")
+
+          with config_path.open("r", encoding="utf-8") as config_file:
+              config = yaml.safe_load(config_file)
+          if not isinstance(config, dict):
+              raise SystemExit("agentic_prompt_app/config.yaml must parse to a YAML mapping")
+
+          errors: list[str] = []
+
+          def require_string(key: str) -> str:
+              value = config.get(key)
+              if not isinstance(value, str) or not value.strip():
+                  errors.append(f"{key} must be a non-empty string")
+                  return ""
+              return value.strip()
+
+          for key in ("name", "url", "maintainer"):
+              value = repository.get(key)
+              if not isinstance(value, str) or not value.strip():
+                  errors.append(f"repository.yaml {key} must be a non-empty string")
+
+          name = require_string("name")
+          slug = require_string("slug")
+          version = require_string("version")
+
+          if name and len(name) > 64:
+              errors.append("name should be 64 characters or fewer")
+          if slug and not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", slug):
+              errors.append("slug must use lowercase letters, numbers, and single underscores")
+          if version and not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
+              errors.append("version must look like semantic versioning, for example 0.5.27")
+
+          arch = config.get("arch")
+          valid_arches = {"aarch64", "amd64", "armhf", "armv7", "i386"}
+          if not isinstance(arch, list) or not arch:
+              errors.append("arch must be a non-empty list")
+          elif not all(isinstance(item, str) for item in arch):
+              errors.append("arch values must be strings")
+          elif invalid_arches := sorted(set(arch) - valid_arches):
+              errors.append(f"arch contains unsupported values: {', '.join(invalid_arches)}")
+
+          for key in ("options", "schema"):
+              value = config.get(key)
+              if value is not None and not isinstance(value, dict):
+                  errors.append(f"{key} must be a mapping when present")
+
+          # Home Assistant add-ons normally declare default options in config.yaml.
+          # If a separate options.json is added later, keep it valid JSON; otherwise
+          # absence is explicit and acceptable because config.yaml owns defaults.
+          if options_path.exists():
+              try:
+                  parsed_options = json.loads(options_path.read_text(encoding="utf-8"))
+              except json.JSONDecodeError as exc:
+                  errors.append(f"options.json is not valid JSON: {exc}")
+              else:
+                  if not isinstance(parsed_options, dict):
+                      errors.append("options.json must contain a JSON object when present")
+          elif "options" not in config:
+              errors.append("options.json is absent, so config.yaml must define options")
+          else:
+              print("options.json is absent; using config.yaml options defaults.")
+
+          ingress = config.get("ingress", False)
+          if ingress is not None and not isinstance(ingress, bool):
+              errors.append("ingress must be a boolean when present")
+
+          ingress_port = config.get("ingress_port")
+          if ingress:
+              if not isinstance(ingress_port, int) or not (1 <= ingress_port <= 65535):
+                  errors.append("ingress_port must be an integer from 1 to 65535 when ingress is true")
+
+              webui = config.get("webui")
+              if webui is not None:
+                  if not isinstance(webui, str):
+                      errors.append("webui must be a string when present")
+                  elif f"[PORT:{ingress_port}]" not in webui:
+                      errors.append("webui must reference the same port as ingress_port")
+
+              ports = config.get("ports", {})
+              if ports is not None and not isinstance(ports, dict):
+                  errors.append("ports must be a mapping when present")
+              elif isinstance(ports, dict) and ports:
+                  port_key = f"{ingress_port}/tcp"
+                  if port_key not in ports:
+                      errors.append(f"ports should include {port_key} when ports are exposed")
+
+          run_sh = addon_dir / "run.sh"
+          source_mode = run_sh.stat().st_mode
+          if not (source_mode & stat.S_IXUSR):
+              dockerfile_text = (addon_dir / "Dockerfile").read_text(encoding="utf-8")
+              if "chmod +x /app/run.sh" not in dockerfile_text:
+                  errors.append("run.sh is not executable in git and Dockerfile does not chmod /app/run.sh")
+              else:
+                  print("run.sh is chmodded executable in the Docker image.")
+
+          if errors:
+              raise SystemExit("Add-on validation failed:\n- " + "\n- ".join(errors))
+
+          print(f"Validated add-on metadata: slug={slug}, name={name!r}, version={version}")
+          PY
+
+      - name: Build add-on Docker image
+        run: |
+          set -euo pipefail
+          # This verifies the Dockerfile and copied application files can produce
+          # an installable add-on image from the add-on directory build context.
+          docker build \
+            -f "${ADDON_DIR}/Dockerfile" \
+            -t "${IMAGE_NAME}" \
+            "${ADDON_DIR}"
+
+      - name: Verify built image layout
+        run: |
+          set -euo pipefail
+          # The runtime image must contain the Flask app, static/template assets,
+          # config metadata, and an executable entrypoint script.
+          docker run --rm --entrypoint sh "${IMAGE_NAME}" -lc '
+            set -eu
+            test -x /app/run.sh
+            test -f /app/app.py
+            test -f /app/config.yaml
+            test -f /app/requirements.txt
+            test -d /app/templates
+            test -d /app/static
+          '
