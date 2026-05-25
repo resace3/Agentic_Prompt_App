@@ -129,6 +129,21 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["reason"], "outside_time_window")
 
+    def test_jitai_time_window_uses_configured_local_timezone(self):
+        jitai = self.sample_jitai(
+            time_zone="America/New_York",
+            time_windows=[{"days": ["mon"], "start": "08:00", "end": "09:00"}],
+        )
+        result = jitai_engine.evaluate_jitai(
+            jitai,
+            {"sensor.steps": "2000"},
+            now=datetime(2026, 5, 25, 12, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["reason"], "trigger_matched")
+        self.assertEqual(jitai["time_zone"], "America/New_York")
+
     def test_jitai_execution_sets_cooldown_and_logs_event(self):
         _, jitai = jitai_engine.upsert_jitai(self.sample_jitai())
         first = jitai_engine.evaluate_and_maybe_execute(

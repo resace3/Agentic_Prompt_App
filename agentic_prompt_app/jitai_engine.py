@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, time, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 INVALID_SENSOR_STATES = {"", "unknown", "unavailable", "none", "null"}
@@ -127,6 +128,7 @@ def normalize_jitai(raw):
         "retry_delay_seconds": clamp_int(raw.get("retry_delay_seconds", 300), 0, 24 * 60 * 60),
         "action": normalize_action(raw.get("action") or {}),
         "learning": raw.get("learning") if isinstance(raw.get("learning"), dict) else {},
+        "time_zone": normalize_time_zone(raw.get("time_zone")),
         "created_at": raw.get("created_at") or now,
         "updated_at": now,
     }
@@ -191,6 +193,15 @@ def normalize_action(raw):
     }
 
 
+def normalize_time_zone(value):
+    zone_name = str(value or "UTC").strip() or "UTC"
+    try:
+        ZoneInfo(zone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise JitaiError("Unsupported JITAI time_zone.", error_type="invalid_time_zone") from exc
+    return zone_name
+
+
 def clamp_int(value, minimum, maximum):
     try:
         parsed = int(value)
@@ -244,8 +255,12 @@ def is_within_time_windows(jitai, now=None):
     if not windows:
         return True, None
     now = now or utc_now()
-    day = now.strftime("%a").lower()[:3]
-    now_time = now.time().replace(second=0, microsecond=0)
+    try:
+        local_now = now.astimezone(ZoneInfo(jitai.get("time_zone") or "UTC"))
+    except ZoneInfoNotFoundError:
+        local_now = now.astimezone(timezone.utc)
+    day = local_now.strftime("%a").lower()[:3]
+    now_time = local_now.time().replace(second=0, microsecond=0)
     for window in windows:
         days = window.get("days") or []
         if days and day not in days:
