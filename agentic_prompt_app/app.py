@@ -33,6 +33,8 @@ from flask import Flask, jsonify, render_template, request, session
 from openai import OpenAI
 from werkzeug.exceptions import HTTPException
 
+import jitai_engine
+
 
 DEFAULT_PROVIDER = "openai"
 DEFAULT_MODEL = "gpt-4.1-nano"
@@ -184,7 +186,7 @@ DEFAULT_INSTRUCTIONS = (
     "read-only Home Assistant history API data for entities from the Sensor Maps "
     "table; use it directly and do not ask the user to export that same sensor data."
 )
-HOME_ASSISTANT_API_URL = os.environ.get("HOME_ASSISTANT_API_URL", "http://supervisor/core/api").rstrip("/")
+HOME_ASSISTANT_API_URL = "http://supervisor/core/api"
 SENSOR_MAP_PATHS = [
     os.environ.get("SENSOR_MAP_PATH"),
     "/data/sensor_map.json",
@@ -439,6 +441,12 @@ class ApiError(Exception):
 
 class ProviderApiError(ApiError):
     pass
+
+
+class HomeAssistantApiHttpError(RuntimeError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f"Home Assistant API HTTP error {status_code}")
 
 
 def api_error_payload(message, error_type="error", fix_steps=None, details_safe=None):
@@ -760,28 +768,11 @@ def compact_model_info(model):
 
 
 def home_assistant_api_url():
-    return os.environ.get("HOME_ASSISTANT_API_URL", HOME_ASSISTANT_API_URL).rstrip("/")
-
-
-def env_value(name):
-    value = os.environ.get(name)
-    if value:
-        return value
-    for directory in ("/var/run/s6/container_environment", "/run/s6/container_environment"):
-        path = os.path.join(directory, name)
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    file_value = handle.read().strip()
-                if file_value:
-                    return file_value
-            except OSError:
-                continue
-    return None
+    return HOME_ASSISTANT_API_URL
 
 
 def home_assistant_token():
-    return env_value("SUPERVISOR_TOKEN") or env_value("HOME_ASSISTANT_TOKEN")
+    return os.environ.get("SUPERVISOR_TOKEN")
 
 
 def home_assistant_api_request(path, params=None, timeout=30):
@@ -803,10 +794,9 @@ def home_assistant_api_request(path, params=None, timeout=30):
         with urllib.request.urlopen(api_request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Home Assistant API error {exc.code}: {detail}") from exc
+        raise HomeAssistantApiHttpError(exc.code) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Home Assistant API connection error: {exc.reason}") from exc
+        raise RuntimeError("Home Assistant API connection error") from exc
 
 
 def home_assistant_config():
@@ -897,7 +887,10 @@ def home_assistant_api_check():
             False,
             "missing_token",
             "SUPERVISOR_TOKEN is not available, so Home Assistant API context cannot be read.",
-            fix_steps=["Set homeassistant_api: true in config.yaml.", "Rebuild and restart the add-on."],
+            fix_steps=[
+                "Set hassio_api: true and homeassistant_api: true in config.yaml.",
+                "Rebuild and restart the add-on.",
+            ],
             safe_details={"api_url": home_assistant_api_url()},
         )
     try:
@@ -909,20 +902,32 @@ def home_assistant_api_check():
             "Home Assistant API is reachable.",
             safe_details={"api_url": home_assistant_api_url(), "time_zone": config.get("time_zone")},
         )
-    except Exception as exc:
-        text = str(exc)
-        status = "auth_failed" if "401" in text or "403" in text else "unreachable"
+    except HomeAssistantApiHttpError as exc:
+        status = "auth_failed" if exc.status_code in {401, 403} else "http_error"
         return check_item(
             "home_assistant_api",
             False,
             status,
             "Home Assistant API could not be read.",
             fix_steps=[
-                "Confirm homeassistant_api: true in config.yaml.",
+                "Confirm hassio_api: true and homeassistant_api: true in config.yaml.",
                 "Restart the add-on after updating permissions.",
                 "Check Supervisor and add-on logs.",
             ],
-            safe_details={"api_url": home_assistant_api_url(), "error": text[:500]},
+            safe_details={"api_url": home_assistant_api_url(), "http_status": exc.status_code},
+        )
+    except Exception as exc:
+        return check_item(
+            "home_assistant_api",
+            False,
+            "unreachable",
+            "Home Assistant API could not be read.",
+            fix_steps=[
+                "Confirm hassio_api: true and homeassistant_api: true in config.yaml.",
+                "Restart the add-on after updating permissions.",
+                "Check Supervisor and add-on logs.",
+            ],
+            safe_details={"api_url": home_assistant_api_url(), "error_type": type(exc).__name__},
         )
 
 
@@ -951,9 +956,12 @@ def config_status_payload():
         ),
         check_item(
             "hassio_api_permission",
-            True,
-            "not_required",
-            "hassio_api is not required for the current read-only Home Assistant API features.",
+            addon_config.get("hassio_api") is True,
+            "ok" if addon_config.get("hassio_api") is True else "failed",
+            "hassio_api permission is enabled."
+            if addon_config.get("hassio_api") is True
+            else "hassio_api permission is missing.",
+            fix_steps=["Set hassio_api: true in config.yaml."],
             safe_details={"hassio_api": addon_config.get("hassio_api", False)},
         ),
         data_writable_check(),
@@ -4703,6 +4711,68 @@ def sensor_data():
     return jsonify(data)
 
 
+def jitai_api_error(exc):
+    return api_error_response(
+        exc.message,
+        status=exc.status,
+        error_type=exc.error_type,
+        details_safe=exc.details_safe,
+    )
+
+
+@app.get("/api/jitais")
+def jitais():
+    return jsonify(api_success(jitai_engine.list_jitais()))
+
+
+@app.post("/api/jitais")
+def create_or_update_jitai():
+    payload = request.get_json(silent=True) or {}
+    try:
+        store, jitai = jitai_engine.upsert_jitai(payload)
+    except jitai_engine.JitaiError as exc:
+        return jitai_api_error(exc)
+    return jsonify(api_success({"jitai": jitai, "jitais": store["jitais"], "runtime": store["runtime"]}))
+
+
+@app.delete("/api/jitais/<jitai_id>")
+def delete_jitai(jitai_id):
+    try:
+        store = jitai_engine.delete_jitai(jitai_id)
+    except jitai_engine.JitaiError as exc:
+        return jitai_api_error(exc)
+    return jsonify(api_success({"jitais": store["jitais"], "runtime": store["runtime"]}))
+
+
+@app.post("/api/jitais/<jitai_id>/evaluate")
+def evaluate_jitai(jitai_id):
+    payload = request.get_json(silent=True) or {}
+    execute = bool(payload.get("execute"))
+    supplied_states = payload.get("sensor_states") if isinstance(payload.get("sensor_states"), dict) else {}
+
+    try:
+        store = jitai_engine.load_store()
+        jitai = jitai_engine.find_jitai(store, jitai_id)
+        sensor_states = jitai_engine.sensor_states_for_jitai(jitai, supplied_states=supplied_states)
+        result = jitai_engine.evaluate_and_maybe_execute(jitai_id, sensor_states, execute=execute)
+    except jitai_engine.JitaiError as exc:
+        return jitai_api_error(exc)
+
+    return jsonify(api_success(result))
+
+
+@app.get("/api/jitais/events")
+def jitai_events():
+    return jsonify(
+        api_success(
+            jitai_engine.events(
+                jitai_id=(request.args.get("jitai_id") or None),
+                limit=request.args.get("limit", "100"),
+            )
+        )
+    )
+
+
 @app.post("/api/reset")
 def reset():
     conversation = create_conversation()
@@ -4716,6 +4786,14 @@ def reset():
     )
 
 
+def validate_startup_environment():
+    if not home_assistant_token():
+        raise RuntimeError("SUPERVISOR_TOKEN is required for Home Assistant add-on startup.")
+    if home_assistant_api_url() != "http://supervisor/core/api":
+        raise RuntimeError("Home Assistant API URL must use Supervisor routing.")
+
+
 if __name__ == "__main__":
+    validate_startup_environment()
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
