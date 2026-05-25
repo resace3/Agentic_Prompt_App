@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import app as app_module
+import jitai_engine
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,9 +27,11 @@ class PromptAppTests(unittest.TestCase):
         self.previous_secrets_yaml = os.environ.get("SECRETS_YAML")
         self.previous_recorder_db_path = os.environ.get("HA_RECORDER_DB_PATH")
         self.previous_jitai_learning_path = os.environ.get("JITAI_LEARNING_PATH")
+        self.previous_jitai_store_path = os.environ.get("JITAI_STORE_PATH")
         os.environ["SENSOR_MAP_PATH"] = os.path.join(self.temp_dir.name, "sensor_map.json")
         os.environ["CHAT_STORE_PATH"] = os.path.join(self.temp_dir.name, "chat_history.json")
         os.environ["JITAI_LEARNING_PATH"] = os.path.join(self.temp_dir.name, "jitai_learning.json")
+        os.environ["JITAI_STORE_PATH"] = os.path.join(self.temp_dir.name, "jitai_store.json")
         os.environ["OPENAI_API_KEY"] = "test-openai-key"
         os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
         os.environ.pop("CLAUDE_API_KEY", None)
@@ -70,8 +73,157 @@ class PromptAppTests(unittest.TestCase):
             os.environ.pop("JITAI_LEARNING_PATH", None)
         else:
             os.environ["JITAI_LEARNING_PATH"] = self.previous_jitai_learning_path
+        if self.previous_jitai_store_path is None:
+            os.environ.pop("JITAI_STORE_PATH", None)
+        else:
+            os.environ["JITAI_STORE_PATH"] = self.previous_jitai_store_path
         app_module.chat_store_loaded_path = None
         self.temp_dir.cleanup()
+
+    def sample_jitai(self, **overrides):
+        data = {
+            "id": "hydrate",
+            "name": "Hydration prompt",
+            "triggers": [
+                {
+                    "type": "sensor_threshold",
+                    "entity_id": "sensor.steps",
+                    "operator": ">=",
+                    "threshold": 1000,
+                }
+            ],
+            "time_windows": [{"days": ["mon"], "start": "08:00", "end": "18:00"}],
+            "cooldown_seconds": 600,
+            "max_retries": 1,
+            "retry_delay_seconds": 120,
+            "action": {"type": "log", "message": "Drink water."},
+        }
+        data.update(overrides)
+        return jitai_engine.normalize_jitai(data)
+
+    def test_jitai_threshold_trigger_matches_numeric_sensor_state(self):
+        jitai = self.sample_jitai()
+        result = jitai_engine.evaluate_jitai(
+            jitai,
+            {"sensor.steps": "1001"},
+            now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["reason"], "trigger_matched")
+        self.assertTrue(result["trigger_results"][0]["matched"])
+
+    def test_jitai_threshold_ignores_invalid_sensor_state(self):
+        jitai = self.sample_jitai()
+        result = jitai_engine.evaluate_jitai(
+            jitai,
+            {"sensor.steps": "unavailable"},
+            now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "trigger_not_matched")
+        self.assertEqual(result["trigger_results"][0]["reason"], "invalid_or_missing_state")
+
+    def test_jitai_time_window_skips_outside_window(self):
+        jitai = self.sample_jitai()
+        result = jitai_engine.evaluate_jitai(
+            jitai,
+            {"sensor.steps": "2000"},
+            now=datetime(2026, 5, 25, 19, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "outside_time_window")
+
+    def test_jitai_time_window_uses_configured_local_timezone(self):
+        jitai = self.sample_jitai(
+            time_zone="America/New_York",
+            time_windows=[{"days": ["mon"], "start": "08:00", "end": "09:00"}],
+        )
+        result = jitai_engine.evaluate_jitai(
+            jitai,
+            {"sensor.steps": "2000"},
+            now=datetime(2026, 5, 25, 12, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["reason"], "trigger_matched")
+        self.assertEqual(jitai["time_zone"], "America/New_York")
+
+    def test_jitai_execution_sets_cooldown_and_logs_event(self):
+        _, jitai = jitai_engine.upsert_jitai(self.sample_jitai())
+        first = jitai_engine.evaluate_and_maybe_execute(
+            jitai["id"],
+            {"sensor.steps": "2000"},
+            execute=True,
+            now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        )
+        second = jitai_engine.evaluate_and_maybe_execute(
+            jitai["id"],
+            {"sensor.steps": "2000"},
+            execute=True,
+            now=datetime(2026, 5, 25, 12, 5, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(first["event"]["event_type"], "executed")
+        self.assertEqual(second["decision"]["reason"], "cooldown_active")
+        event_rows = jitai_engine.events(jitai_id=jitai["id"])["events"]
+        self.assertEqual([row["event_type"] for row in event_rows], ["executed", "skipped"])
+
+    def test_jitai_failed_action_schedules_retry_then_exhausts(self):
+        _, jitai = jitai_engine.upsert_jitai(self.sample_jitai(action={"type": "test_fail"}))
+        first = jitai_engine.evaluate_and_maybe_execute(
+            jitai["id"],
+            {"sensor.steps": "2000"},
+            execute=True,
+            now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        )
+        blocked = jitai_engine.evaluate_and_maybe_execute(
+            jitai["id"],
+            {"sensor.steps": "2000"},
+            execute=True,
+            now=datetime(2026, 5, 25, 12, 1, tzinfo=timezone.utc),
+        )
+        exhausted = jitai_engine.evaluate_and_maybe_execute(
+            jitai["id"],
+            {"sensor.steps": "2000"},
+            execute=True,
+            now=datetime(2026, 5, 25, 12, 3, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(first["event"]["reason"], "action_failed_retry_scheduled")
+        self.assertEqual(blocked["decision"]["reason"], "retry_delay_active")
+        self.assertEqual(exhausted["event"]["reason"], "action_failed_retries_exhausted")
+
+    def test_jitai_storage_persists_definition_and_runtime(self):
+        _, jitai = jitai_engine.upsert_jitai(self.sample_jitai())
+        jitai_engine.evaluate_and_maybe_execute(
+            jitai["id"],
+            {"sensor.steps": "2000"},
+            execute=True,
+            now=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+        )
+
+        loaded = jitai_engine.load_store()
+
+        self.assertEqual(loaded["jitais"][0]["id"], "hydrate")
+        self.assertIn("hydrate", loaded["runtime"])
+        self.assertEqual(loaded["events"][0]["event_type"], "executed")
+
+    def test_jitai_api_persists_and_evaluates_supplied_states(self):
+        create_response = self.client.post("/api/jitais", json=self.sample_jitai())
+        self.assertEqual(create_response.status_code, 200)
+
+        evaluate_response = self.client.post(
+            "/api/jitais/hydrate/evaluate",
+            json={"execute": True, "sensor_states": {"sensor.steps": "2500"}},
+        )
+        data = evaluate_response.get_json()
+
+        self.assertEqual(evaluate_response.status_code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["event"]["event_type"], "executed")
 
     def write_fake_recorder_db(self, entities):
         db_path = os.path.join(self.temp_dir.name, "home-assistant_v2.db")

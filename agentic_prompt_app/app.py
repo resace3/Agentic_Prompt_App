@@ -34,6 +34,8 @@ from jitai_learning import context_breakdown, effectiveness_metrics, record_resp
 from openai import OpenAI
 from werkzeug.exceptions import HTTPException
 
+import jitai_engine
+
 
 DEFAULT_PROVIDER = "openai"
 DEFAULT_MODEL = "gpt-4.1-nano"
@@ -4738,6 +4740,68 @@ def jitai_suggestions():
     payload = request.get_json(silent=True) or {}
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     return jsonify(api_success({"suggestions": suggest_improvements(context=context)}))
+
+
+def jitai_api_error(exc):
+    return api_error_response(
+        exc.message,
+        status=exc.status,
+        error_type=exc.error_type,
+        details_safe=exc.details_safe,
+    )
+
+
+@app.get("/api/jitais")
+def jitais():
+    return jsonify(api_success(jitai_engine.list_jitais()))
+
+
+@app.post("/api/jitais")
+def create_or_update_jitai():
+    payload = request.get_json(silent=True) or {}
+    try:
+        store, jitai = jitai_engine.upsert_jitai(payload)
+    except jitai_engine.JitaiError as exc:
+        return jitai_api_error(exc)
+    return jsonify(api_success({"jitai": jitai, "jitais": store["jitais"], "runtime": store["runtime"]}))
+
+
+@app.delete("/api/jitais/<jitai_id>")
+def delete_jitai(jitai_id):
+    try:
+        store = jitai_engine.delete_jitai(jitai_id)
+    except jitai_engine.JitaiError as exc:
+        return jitai_api_error(exc)
+    return jsonify(api_success({"jitais": store["jitais"], "runtime": store["runtime"]}))
+
+
+@app.post("/api/jitais/<jitai_id>/evaluate")
+def evaluate_jitai(jitai_id):
+    payload = request.get_json(silent=True) or {}
+    execute = bool(payload.get("execute"))
+    supplied_states = payload.get("sensor_states") if isinstance(payload.get("sensor_states"), dict) else {}
+
+    try:
+        store = jitai_engine.load_store()
+        jitai = jitai_engine.find_jitai(store, jitai_id)
+        sensor_states = jitai_engine.sensor_states_for_jitai(jitai, supplied_states=supplied_states)
+        result = jitai_engine.evaluate_and_maybe_execute(jitai_id, sensor_states, execute=execute)
+    except jitai_engine.JitaiError as exc:
+        return jitai_api_error(exc)
+
+    return jsonify(api_success(result))
+
+
+@app.get("/api/jitais/events")
+def jitai_events():
+    return jsonify(
+        api_success(
+            jitai_engine.events(
+                jitai_id=(request.args.get("jitai_id") or None),
+                limit=request.args.get("limit", "100"),
+            )
+        )
+    )
 
 
 @app.post("/api/reset")

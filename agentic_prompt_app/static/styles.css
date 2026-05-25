@@ -665,7 +665,7 @@ select {
 
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 12px;
   min-height: 0;
   padding: 16px 20px 20px;
@@ -721,6 +721,187 @@ button:disabled {
   min-width: auto;
   padding: 10px 14px;
   background: #475569;
+}
+
+.jitai-composer-button,
+.secondary-button {
+  background: #0f766e;
+}
+
+.jitai-composer-button:hover,
+.secondary-button:hover {
+  background: #115e59;
+}
+
+.modal-open {
+  overflow: hidden;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  padding: 16px;
+  overflow: auto;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.jitai-modal {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100dvh - 32px));
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 22px 70px rgba(15, 23, 42, 0.28);
+}
+
+.jitai-form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: inherit;
+  min-height: 0;
+}
+
+.jitai-modal-header,
+.jitai-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.jitai-modal-footer {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+}
+
+.jitai-modal-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.jitai-draft-status {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.modal-icon-button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  background: #475569;
+  line-height: 1;
+}
+
+.jitai-modal-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.jitai-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.jitai-field-wide,
+.jitai-entity-field {
+  grid-column: 1 / -1;
+}
+
+.jitai-field textarea,
+.jitai-field input,
+.jitai-field select {
+  text-transform: none;
+}
+
+.jitai-field textarea {
+  min-height: 82px;
+  max-height: 160px;
+}
+
+.jitai-entity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.jitai-entity-row input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.jitai-entity-row button {
+  min-height: 42px;
+  padding: 0 14px;
+}
+
+.jitai-entity-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 30px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafc;
+  text-transform: none;
+}
+
+.jitai-entity-chip {
+  min-width: 0;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 0 9px;
+  overflow: hidden;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  background: #ccfbf1;
+  color: #134e4a;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jitai-entity-chip:hover {
+  background: #99f6e4;
+  color: #134e4a;
+}
+
+.jitai-empty-entities {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
 }
 
 .sensor-panel {
