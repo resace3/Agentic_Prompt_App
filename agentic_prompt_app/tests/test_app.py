@@ -580,11 +580,37 @@ class PromptAppTests(unittest.TestCase):
     def test_home_assistant_api_uses_supervisor_token(self):
         original_token = os.environ.get("SUPERVISOR_TOKEN")
         original_home_assistant_token = os.environ.get("HOME_ASSISTANT_TOKEN")
+        original_api_url = os.environ.get("HOME_ASSISTANT_API_URL")
         os.environ["SUPERVISOR_TOKEN"] = "supervisor-test-token"
-        os.environ.pop("HOME_ASSISTANT_TOKEN", None)
+        os.environ["HOME_ASSISTANT_TOKEN"] = "legacy-token-should-be-ignored"
+        os.environ["HOME_ASSISTANT_API_URL"] = "http://example.invalid/api"
         try:
             self.assertEqual(app_module.home_assistant_token(), "supervisor-test-token")
+            self.assertEqual(app_module.home_assistant_api_url(), "http://supervisor/core/api")
             self.assertIsNone(app_module.home_assistant_db_path())
+        finally:
+            if original_token is None:
+                os.environ.pop("SUPERVISOR_TOKEN", None)
+            else:
+                os.environ["SUPERVISOR_TOKEN"] = original_token
+            if original_home_assistant_token is None:
+                os.environ.pop("HOME_ASSISTANT_TOKEN", None)
+            else:
+                os.environ["HOME_ASSISTANT_TOKEN"] = original_home_assistant_token
+            if original_api_url is None:
+                os.environ.pop("HOME_ASSISTANT_API_URL", None)
+            else:
+                os.environ["HOME_ASSISTANT_API_URL"] = original_api_url
+
+    def test_startup_validation_requires_supervisor_token_without_fallback(self):
+        original_token = os.environ.get("SUPERVISOR_TOKEN")
+        original_home_assistant_token = os.environ.get("HOME_ASSISTANT_TOKEN")
+        os.environ.pop("SUPERVISOR_TOKEN", None)
+        os.environ["HOME_ASSISTANT_TOKEN"] = "legacy-token-should-be-ignored"
+        try:
+            self.assertIsNone(app_module.home_assistant_token())
+            with self.assertRaisesRegex(RuntimeError, "SUPERVISOR_TOKEN is required"):
+                app_module.validate_startup_environment()
         finally:
             if original_token is None:
                 os.environ.pop("SUPERVISOR_TOKEN", None)
@@ -704,7 +730,14 @@ class PromptAppTests(unittest.TestCase):
 
     def test_config_status_and_diagnostics_report_safe_setup_details(self):
         config_response = self.client.get("/api/config-status")
-        diagnostics_response = self.client.get("/api/diagnostics")
+        diagnostics_response = self.client.get(
+            "/api/diagnostics",
+            headers={
+                "X-Ingress-Path": "/api/hassio_ingress/secret-prefix",
+                "X-Forwarded-Prefix": "/secret-forwarded-prefix",
+                "X-Proxy-Prefix": "/secret-proxy-prefix",
+            },
+        )
         config_data = config_response.get_json()
         diagnostics_data = diagnostics_response.get_json()
 
@@ -712,12 +745,63 @@ class PromptAppTests(unittest.TestCase):
         self.assertIn("status", config_data)
         self.assertIn("checks", config_data)
         self.assertIn("home_assistant_api", {check["name"] for check in config_data["checks"]})
+        checks_by_name = {check["name"]: check for check in config_data["checks"]}
+        self.assertEqual(checks_by_name["hassio_api_permission"]["status"], "ok")
+        self.assertTrue(checks_by_name["hassio_api_permission"]["safe_details"]["hassio_api"])
         self.assertEqual(diagnostics_response.status_code, 200)
         self.assertIn("status", diagnostics_data)
         self.assertIn("static_styles.css", {check["name"] for check in diagnostics_data["checks"]})
         self.assertIn("static_app.js", {check["name"] for check in diagnostics_data["checks"]})
         self.assertNotIn("test-openai-key", str(diagnostics_data))
         self.assertNotIn("test-anthropic-key", str(diagnostics_data))
+        diagnostics_text = str(diagnostics_data)
+        self.assertNotIn("secret-prefix", diagnostics_text)
+        self.assertNotIn("secret-forwarded-prefix", diagnostics_text)
+        self.assertNotIn("secret-proxy-prefix", diagnostics_text)
+        request_prefix = {check["name"]: check for check in diagnostics_data["checks"]}["request_prefix"]
+        self.assertTrue(request_prefix["safe_details"]["x_ingress_path_present"])
+        self.assertEqual(
+            request_prefix["safe_details"]["x_ingress_path_length"],
+            len("/api/hassio_ingress/secret-prefix"),
+        )
+
+    def test_home_assistant_api_check_redacts_backend_error_details(self):
+        original_token = os.environ.get("SUPERVISOR_TOKEN")
+        original_config = app_module.home_assistant_config
+        os.environ["SUPERVISOR_TOKEN"] = "supervisor-test-token"
+
+        def failing_config():
+            raise app_module.HomeAssistantApiHttpError(403)
+
+        app_module.home_assistant_config = failing_config
+        try:
+            check = app_module.home_assistant_api_check()
+            self.assertFalse(check["ok"])
+            self.assertEqual(check["status"], "auth_failed")
+            self.assertEqual(check["safe_details"]["http_status"], 403)
+            self.assertNotIn("supervisor-test-token", str(check))
+            self.assertNotIn("Authorization", str(check))
+            self.assertNotIn("error", check["safe_details"])
+        finally:
+            app_module.home_assistant_config = original_config
+            if original_token is None:
+                os.environ.pop("SUPERVISOR_TOKEN", None)
+            else:
+                os.environ["SUPERVISOR_TOKEN"] = original_token
+
+    def test_home_assistant_security_static_contract(self):
+        app_source = Path(app_module.__file__).read_text(encoding="utf-8")
+        run_sh = (ROOT / "run.sh").read_text(encoding="utf-8")
+        config_yaml = (ROOT / "config.yaml").read_text(encoding="utf-8")
+
+        self.assertNotIn("HOME_ASSISTANT_TOKEN", app_source)
+        self.assertNotIn("HOME_ASSISTANT_API_URL", run_sh)
+        self.assertIn('HOME_ASSISTANT_API_URL = "http://supervisor/core/api"', app_source)
+        self.assertIn('return os.environ.get("SUPERVISOR_TOKEN")', app_source)
+        self.assertIn('"Authorization": f"Bearer {token}"', app_source)
+        self.assertTrue(run_sh.startswith("#!/usr/bin/with-contenv sh\n"))
+        self.assertIn("hassio_api: true", config_yaml)
+        self.assertIn("homeassistant_api: true", config_yaml)
 
     def test_api_404_returns_structured_json(self):
         response = self.client.get("/api/not-found")

@@ -9,6 +9,93 @@ agentic_prompt_app/
 
 Do not move `config.yaml`, `Dockerfile`, `run.sh`, templates, static assets, or tests back to the repository root.
 
+## Branch Safety Rules
+
+### Critical Rules
+
+Agents are never allowed to:
+
+- Push directly to `main`.
+- Merge into `main`.
+- Commit directly to `main`.
+- Rewrite `main`.
+- Force push to `main`.
+- Delete `main`.
+- Open automated merges into `main`.
+
+Agents must:
+
+- Do all development work on `dev`.
+- Create feature branches off `dev` if needed.
+- Open pull requests targeting `dev`.
+- Leave merging to humans.
+- Assume `main` is production.
+- Treat `main` as read-only.
+
+### Required Workflow
+
+Allowed workflow:
+
+```text
+feature branch -> dev -> human reviewed PR -> main
+```
+
+Disallowed workflows:
+
+```text
+feature branch -> main
+dev -> direct push to main
+agent auto-merge into main
+```
+
+### Pull Request Rules
+
+Agents may:
+
+- Create PRs into `dev`.
+- Update PR descriptions.
+- Run CI.
+- Fix CI failures.
+- Suggest merges.
+
+Agents may not:
+
+- Click merge.
+- Auto-approve PRs.
+- Bypass protections.
+- Disable GitHub Actions protections.
+
+### Git Rules
+
+Before any git operation, verify the current branch is not `main`. If the current branch is `main`, stop immediately.
+
+Agents must run:
+
+```sh
+git branch --show-current
+```
+
+before:
+
+- Commit.
+- Push.
+- Rebase.
+- Merge.
+
+### Deployment Rules
+
+Production deployments must only originate from `main`.
+
+Agents must never deploy from:
+
+- Experimental branches.
+- Feature branches.
+- Temporary branches.
+
+### Human Approval Requirement
+
+Any operation involving `main`, releases, tags, deployments, or production configuration requires explicit human approval.
+
 ## Working Directory
 
 Most code and test commands should run from:
@@ -99,4 +186,3 @@ Useful coverage areas:
 - Plot type detection and plot specs.
 - Browser overflow regressions.
 - Add-on install/build smoke tests.
-

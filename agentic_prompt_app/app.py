@@ -184,7 +184,7 @@ DEFAULT_INSTRUCTIONS = (
     "read-only Home Assistant history API data for entities from the Sensor Maps "
     "table; use it directly and do not ask the user to export that same sensor data."
 )
-HOME_ASSISTANT_API_URL = os.environ.get("HOME_ASSISTANT_API_URL", "http://supervisor/core/api").rstrip("/")
+HOME_ASSISTANT_API_URL = "http://supervisor/core/api"
 SENSOR_MAP_PATHS = [
     os.environ.get("SENSOR_MAP_PATH"),
     "/data/sensor_map.json",
@@ -441,6 +441,12 @@ class ProviderApiError(ApiError):
     pass
 
 
+class HomeAssistantApiHttpError(RuntimeError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f"Home Assistant API HTTP error {status_code}")
+
+
 def api_error_payload(message, error_type="error", fix_steps=None, details_safe=None):
     return {
         "ok": False,
@@ -466,12 +472,17 @@ def api_success(payload=None):
 @app.before_request
 def log_static_requests():
     if request.path.startswith("/static/"):
+        ingress_path = request.headers.get("X-Ingress-Path") or ""
+        forwarded_prefix = request.headers.get("X-Forwarded-Prefix") or ""
         app.logger.info(
-            "Static request path=%s script_root=%s ingress_path=%s forwarded_prefix=%s",
+            "Static request path=%s script_root_present=%s ingress_path_present=%s ingress_path_length=%s "
+            "forwarded_prefix_present=%s forwarded_prefix_length=%s",
             request.path,
-            request.script_root,
-            request.headers.get("X-Ingress-Path"),
-            request.headers.get("X-Forwarded-Prefix"),
+            bool(request.script_root),
+            bool(ingress_path),
+            len(ingress_path),
+            bool(forwarded_prefix),
+            len(forwarded_prefix),
         )
 
 
@@ -760,28 +771,11 @@ def compact_model_info(model):
 
 
 def home_assistant_api_url():
-    return os.environ.get("HOME_ASSISTANT_API_URL", HOME_ASSISTANT_API_URL).rstrip("/")
-
-
-def env_value(name):
-    value = os.environ.get(name)
-    if value:
-        return value
-    for directory in ("/var/run/s6/container_environment", "/run/s6/container_environment"):
-        path = os.path.join(directory, name)
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    file_value = handle.read().strip()
-                if file_value:
-                    return file_value
-            except OSError:
-                continue
-    return None
+    return HOME_ASSISTANT_API_URL
 
 
 def home_assistant_token():
-    return env_value("SUPERVISOR_TOKEN") or env_value("HOME_ASSISTANT_TOKEN")
+    return os.environ.get("SUPERVISOR_TOKEN")
 
 
 def home_assistant_api_request(path, params=None, timeout=30):
@@ -803,10 +797,9 @@ def home_assistant_api_request(path, params=None, timeout=30):
         with urllib.request.urlopen(api_request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Home Assistant API error {exc.code}: {detail}") from exc
+        raise HomeAssistantApiHttpError(exc.code) from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Home Assistant API connection error: {exc.reason}") from exc
+        raise RuntimeError("Home Assistant API connection error") from exc
 
 
 def home_assistant_config():
@@ -897,7 +890,10 @@ def home_assistant_api_check():
             False,
             "missing_token",
             "SUPERVISOR_TOKEN is not available, so Home Assistant API context cannot be read.",
-            fix_steps=["Set homeassistant_api: true in config.yaml.", "Rebuild and restart the add-on."],
+            fix_steps=[
+                "Set hassio_api: true and homeassistant_api: true in config.yaml.",
+                "Rebuild and restart the add-on.",
+            ],
             safe_details={"api_url": home_assistant_api_url()},
         )
     try:
@@ -909,20 +905,32 @@ def home_assistant_api_check():
             "Home Assistant API is reachable.",
             safe_details={"api_url": home_assistant_api_url(), "time_zone": config.get("time_zone")},
         )
-    except Exception as exc:
-        text = str(exc)
-        status = "auth_failed" if "401" in text or "403" in text else "unreachable"
+    except HomeAssistantApiHttpError as exc:
+        status = "auth_failed" if exc.status_code in {401, 403} else "http_error"
         return check_item(
             "home_assistant_api",
             False,
             status,
             "Home Assistant API could not be read.",
             fix_steps=[
-                "Confirm homeassistant_api: true in config.yaml.",
+                "Confirm hassio_api: true and homeassistant_api: true in config.yaml.",
                 "Restart the add-on after updating permissions.",
                 "Check Supervisor and add-on logs.",
             ],
-            safe_details={"api_url": home_assistant_api_url(), "error": text[:500]},
+            safe_details={"api_url": home_assistant_api_url(), "http_status": exc.status_code},
+        )
+    except Exception as exc:
+        return check_item(
+            "home_assistant_api",
+            False,
+            "unreachable",
+            "Home Assistant API could not be read.",
+            fix_steps=[
+                "Confirm hassio_api: true and homeassistant_api: true in config.yaml.",
+                "Restart the add-on after updating permissions.",
+                "Check Supervisor and add-on logs.",
+            ],
+            safe_details={"api_url": home_assistant_api_url(), "error_type": type(exc).__name__},
         )
 
 
@@ -951,9 +959,12 @@ def config_status_payload():
         ),
         check_item(
             "hassio_api_permission",
-            True,
-            "not_required",
-            "hassio_api is not required for the current read-only Home Assistant API features.",
+            addon_config.get("hassio_api") is True,
+            "ok" if addon_config.get("hassio_api") is True else "failed",
+            "hassio_api permission is enabled."
+            if addon_config.get("hassio_api") is True
+            else "hassio_api permission is missing.",
+            fix_steps=["Set hassio_api: true in config.yaml."],
             safe_details={"hassio_api": addon_config.get("hassio_api", False)},
         ),
         data_writable_check(),
@@ -987,10 +998,14 @@ def diagnostics_payload():
             "observed",
             "Request prefix diagnostics captured.",
             safe_details={
-                "script_root": request.script_root,
-                "x_ingress_path": request.headers.get("X-Ingress-Path"),
-                "x_forwarded_prefix": request.headers.get("X-Forwarded-Prefix"),
-                "x_proxy_prefix": request.headers.get("X-Proxy-Prefix"),
+                "script_root_present": bool(request.script_root),
+                "script_root_length": len(request.script_root or ""),
+                "x_ingress_path_present": bool(request.headers.get("X-Ingress-Path")),
+                "x_ingress_path_length": len(request.headers.get("X-Ingress-Path") or ""),
+                "x_forwarded_prefix_present": bool(request.headers.get("X-Forwarded-Prefix")),
+                "x_forwarded_prefix_length": len(request.headers.get("X-Forwarded-Prefix") or ""),
+                "x_proxy_prefix_present": bool(request.headers.get("X-Proxy-Prefix")),
+                "x_proxy_prefix_length": len(request.headers.get("X-Proxy-Prefix") or ""),
             },
         ),
     ]
@@ -4716,6 +4731,14 @@ def reset():
     )
 
 
+def validate_startup_environment():
+    if not home_assistant_token():
+        raise RuntimeError("SUPERVISOR_TOKEN is required for Home Assistant add-on startup.")
+    if home_assistant_api_url() != "http://supervisor/core/api":
+        raise RuntimeError("Home Assistant API URL must use Supervisor routing.")
+
+
 if __name__ == "__main__":
+    validate_startup_environment()
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)

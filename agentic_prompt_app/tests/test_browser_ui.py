@@ -470,3 +470,107 @@ $$Y_t = \\alpha + \\beta X_{t-1} + \\epsilon_t$$
         page.locator(".tab[data-tab='prompts']").click()
         prompts_height = page.locator(".app-shell").bounding_box()["height"]
         assert abs(sensor_height - prompts_height) <= 1
+
+
+def test_repeated_rich_prompt_outputs_remain_scrollable_and_contained(page):
+    base_url = os.environ.get("BROWSER_BASE_URL", "http://127.0.0.1:5056")
+    viewports = (
+        {"width": 760, "height": 520},
+        {"width": 430, "height": 620},
+    )
+
+    for size in viewports:
+        page.set_viewport_size(size)
+        page.goto(base_url, wait_until="networkidle")
+        result = page.evaluate(
+            """
+            () => {
+              const wideSvg = btoa('<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="720" viewBox="0 0 2200 720"><rect width="2200" height="720" fill="white"/><text x="80" y="160" font-size="68">Responsive deterministic stress plot</text><rect x="80" y="240" width="520" height="180" fill="#dbeafe" stroke="#2563eb" stroke-width="8"/><rect x="1580" y="240" width="520" height="180" fill="#dcfce7" stroke="#059669" stroke-width="8"/></svg>');
+              const dataUrl = `data:image/svg+xml;base64,${wideSvg}`;
+              const messages = document.querySelector('#messages');
+              messages.innerHTML = '';
+              for (let index = 0; index < 7; index += 1) {
+                messages.appendChild(messageElement({
+                  role: 'assistant',
+                  provider_label: 'OpenAI',
+                  model_label: 'GPT-4.1 Nano',
+                  model: 'gpt-4.1-nano',
+                  content: `### Analysis ${index + 1}\\n\\nA very long sensor name stays inside the response card: sensor.this_is_a_deliberately_long_sensor_name_for_responsive_wrapping_checks_${index}.\\n\\n| Metric | Value | Note |\\n|---|---:|---|\\n| Sleep | 430 | descriptive, not causal |\\n| Steps | 7700 | predictive, not causal |\\n\\nInline math: \\\\(r = \\\\frac{a}{b}\\\\).\\n\\n$$Y_t = \\\\alpha + \\\\beta X_{t-1} + \\\\epsilon_t$$\\n\\n\\`\\`\\`python\\nlong_value = "this code line is intentionally very long and must scroll inside the response card rather than changing the page width"\\n\\`\\`\\``,
+                  plot: {
+                    available: true,
+                    sensor: 'sensor.nick_r_sleep_time_in_bed',
+                    title: 'Time In Bed Stress Plot',
+                    points: [{timestamp: 1, time: 'Day 1', value: 430}],
+                    samples: 1,
+                    min: 430,
+                    average: 430,
+                    max: 430,
+                    latest: 430,
+                    python_image: {
+                      data_url: dataUrl,
+                      title: 'Time In Bed Stress Plot',
+                      renderer: 'matplotlib',
+                      x_axis_label: 'Date',
+                      y_axis_label: 'Time In Bed (minutes)'
+                    }
+                  },
+                  analysis_visuals: {
+                    title: 'Generated visuals',
+                    artifacts: [
+                      {type: 'dag', title: 'Causal DAG', description: 'Assumptions, not proof', data_url: dataUrl},
+                      {type: 'latex', title: 'Equation', description: 'Rendered equation', latex: 'r = \\\\frac{\\\\sum_i X_iY_i}{\\\\sqrt{\\\\sum_i X_i^2}}'}
+                    ]
+                  }
+                }));
+              }
+              messages.scrollTop = messages.scrollHeight;
+              const app = document.querySelector('.app-shell').getBoundingClientRect();
+              const composer = document.querySelector('#promptForm').getBoundingClientRect();
+              const input = document.querySelector('#messageInput').getBoundingClientRect();
+              const send = document.querySelector('#sendButton').getBoundingClientRect();
+              const bounded = Array.from(document.querySelectorAll('.message.assistant, .plot-card, .analysis-artifact, .markdown-table-wrap, .code-block, .latex-equation'));
+              const scrollables = Array.from(document.querySelectorAll('.markdown-table-wrap, .code-block pre, .latex-equation'));
+              const media = Array.from(document.querySelectorAll('.python-plot-image, .analysis-plot-image, .dag-image'));
+              const cardRight = (node) => node.closest('.message.assistant').getBoundingClientRect().right;
+              return {
+                viewport: {width: innerWidth, height: innerHeight},
+                pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                bodyOverflow: document.body.scrollWidth - document.body.clientWidth,
+                appBottom: app.bottom,
+                inputBottom: input.bottom,
+                sendBottom: send.bottom,
+                composerBottom: composer.bottom,
+                messageScrolls: messages.scrollHeight > messages.clientHeight,
+                maxBoundedRightOverflow: Math.max(...bounded.map((node) => node.getBoundingClientRect().right - cardRight(node))),
+                scrollables: scrollables.map((node) => ({
+                  className: node.className,
+                  overflowX: getComputedStyle(node).overflowX,
+                  hasInternalOverflow: node.scrollWidth > node.clientWidth,
+                  rightOverflow: node.getBoundingClientRect().right - cardRight(node),
+                })),
+                maxMediaOverflow: Math.max(...media.map((node) => node.getBoundingClientRect().right - node.parentElement.getBoundingClientRect().right)),
+                messageCount: document.querySelectorAll('.message.assistant').length,
+              };
+            }
+            """
+        )
+        print("repeated rich output snapshot", size, result)
+
+        assert result["messageCount"] == 7
+        assert result["messageScrolls"] is True
+        assert result["pageOverflow"] <= 1, result
+        assert result["bodyOverflow"] <= 1, result
+        assert result["appBottom"] <= result["viewport"]["height"] + 1, result
+        assert result["composerBottom"] <= result["viewport"]["height"] + 16, result
+        assert result["inputBottom"] <= result["viewport"]["height"] + 1, result
+        assert result["sendBottom"] <= result["viewport"]["height"] + 1, result
+        assert result["maxBoundedRightOverflow"] <= 1, result
+        assert result["scrollables"], result
+        assert all(item["rightOverflow"] <= 1 for item in result["scrollables"]), result
+        assert all(item["overflowX"] in {"auto", "scroll"} for item in result["scrollables"]), result
+        assert any(item["hasInternalOverflow"] for item in result["scrollables"]), result
+        assert result["maxMediaOverflow"] <= 1, result
+
+        page.locator(".tab[data-tab='sensorMaps']").click()
+        page.locator(".tab[data-tab='prompts']").click()
+        assert_compact_tabs(tab_layout_snapshot(page))
