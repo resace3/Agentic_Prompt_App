@@ -75,9 +75,10 @@ claude_api_key: sk-ant-...</code></pre>
               id="messageInput"
               name="message"
               rows="3"
-              placeholder="Type your prompt or reply..."
+              placeholder="Type your prompt or describe a JITAI to create..."
               required
             ></textarea>
+            <button id="openJitaiBuilderButton" class="jitai-composer-button" type="button" title="Create a JITAI from this prompt">JITAI</button>
             <button id="sendButton" type="submit">Send</button>
           </form>
         </section>
@@ -112,10 +113,79 @@ claude_api_key: sk-ant-...</code></pre>
       </section>
     </main>
 
+    <div id="jitaiModal" class="modal-backdrop" hidden>
+      <section class="jitai-modal" role="dialog" aria-modal="true" aria-labelledby="jitaiModalTitle">
+        <form id="jitaiForm" class="jitai-form">
+          <header class="jitai-modal-header">
+            <div>
+              <h2 id="jitaiModalTitle">Create JITAI</h2>
+              <span id="jitaiDraftStatus" class="jitai-draft-status">Draft only</span>
+            </div>
+            <button id="closeJitaiModalButton" class="modal-icon-button" type="button" aria-label="Close JITAI editor">x</button>
+          </header>
+
+          <div class="jitai-modal-body">
+            <label class="jitai-field jitai-field-wide" for="jitaiPrompt">
+              <span>Creation Prompt</span>
+              <textarea id="jitaiPrompt" rows="3" placeholder="Describe the behavior to build."></textarea>
+            </label>
+
+            <label class="jitai-field jitai-field-wide" for="jitaiTrigger">
+              <span>Trigger Condition</span>
+              <textarea id="jitaiTrigger" rows="3" required placeholder="Example: if sensor.activity_level is below target after 6 PM"></textarea>
+            </label>
+
+            <label class="jitai-field jitai-field-wide" for="jitaiMessage">
+              <span>Intervention Message</span>
+              <textarea id="jitaiMessage" rows="3" required placeholder="Short, supportive message to deliver."></textarea>
+            </label>
+
+            <label class="jitai-field" for="jitaiTimingWindow">
+              <span>Timing Window</span>
+              <input id="jitaiTimingWindow" type="text" required placeholder="7:00 PM-9:00 PM">
+            </label>
+
+            <label class="jitai-field" for="jitaiCooldown">
+              <span>Cooldown Period</span>
+              <input id="jitaiCooldown" type="text" required placeholder="4 hours">
+            </label>
+
+            <label class="jitai-field" for="jitaiDeliveryType">
+              <span>Delivery Type</span>
+              <select id="jitaiDeliveryType" required>
+                <option value="notification">Notification</option>
+                <option value="persistent_notification">Persistent notification</option>
+                <option value="dashboard_card">Dashboard card</option>
+                <option value="chat_suggestion">Chat suggestion</option>
+              </select>
+            </label>
+
+            <div class="jitai-field jitai-entity-field">
+              <label for="jitaiEntityInput">
+                <span>Sensor / Entity Selection</span>
+              </label>
+              <div class="jitai-entity-row">
+                <input id="jitaiEntityInput" type="text" list="jitaiEntityOptions" placeholder="sensor.example">
+                <datalist id="jitaiEntityOptions"></datalist>
+                <button id="addJitaiEntityButton" type="button">Add</button>
+              </div>
+              <div id="jitaiEntityChips" class="jitai-entity-chips" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <footer class="jitai-modal-footer">
+            <button id="cancelJitaiButton" class="secondary-button" type="button">Cancel</button>
+            <button id="saveJitaiDraftButton" type="submit">Save Draft</button>
+          </footer>
+        </form>
+      </section>
+    </div>
+
     <script>
       const messagesEl = document.querySelector("#messages");
       const form = document.querySelector("#promptForm");
       const input = document.querySelector("#messageInput");
+      const openJitaiBuilderButton = document.querySelector("#openJitaiBuilderButton");
       const sendButton = document.querySelector("#sendButton");
       const resetButton = document.querySelector("#resetButton");
       const keyStatusEl = document.querySelector("#keyStatus");
@@ -135,6 +205,21 @@ claude_api_key: sk-ant-...</code></pre>
       const chatList = document.querySelector("#chatList");
       const chatCount = document.querySelector("#chatCount");
       const newChatButton = document.querySelector("#newChatButton");
+      const jitaiModal = document.querySelector("#jitaiModal");
+      const jitaiForm = document.querySelector("#jitaiForm");
+      const closeJitaiModalButton = document.querySelector("#closeJitaiModalButton");
+      const cancelJitaiButton = document.querySelector("#cancelJitaiButton");
+      const jitaiPrompt = document.querySelector("#jitaiPrompt");
+      const jitaiTrigger = document.querySelector("#jitaiTrigger");
+      const jitaiMessage = document.querySelector("#jitaiMessage");
+      const jitaiTimingWindow = document.querySelector("#jitaiTimingWindow");
+      const jitaiCooldown = document.querySelector("#jitaiCooldown");
+      const jitaiDeliveryType = document.querySelector("#jitaiDeliveryType");
+      const jitaiEntityInput = document.querySelector("#jitaiEntityInput");
+      const jitaiEntityOptions = document.querySelector("#jitaiEntityOptions");
+      const addJitaiEntityButton = document.querySelector("#addJitaiEntityButton");
+      const jitaiEntityChips = document.querySelector("#jitaiEntityChips");
+      const jitaiDraftStatus = document.querySelector("#jitaiDraftStatus");
 
       const PROVIDER_OPTIONS = {{ providers | tojson }};
       const MODEL_OPTIONS = {{ models | tojson }};
@@ -143,6 +228,7 @@ claude_api_key: sk-ant-...</code></pre>
       let keyStatus = {{ key_status | tojson }};
       const PROVIDER_STORAGE_KEY = "promptFlowSelectedProvider.v1";
       const MODEL_STORAGE_KEY = "promptFlowSelectedModel.v5";
+      const JITAI_DRAFT_STORAGE_KEY = "promptFlowJitaiDrafts.v1";
       let messages = [];
       let chats = [];
       let activeChatId = null;
@@ -152,6 +238,8 @@ claude_api_key: sk-ant-...</code></pre>
       let saveTimer = null;
       let loadingStageTimer = null;
       let requestInFlight = false;
+      let jitaiDrafts = [];
+      let jitaiSelectedEntities = [];
 
       const REQUEST_SCRIPT_ROOT = {{ request.script_root | tojson }};
 
@@ -242,9 +330,144 @@ claude_api_key: sk-ant-...</code></pre>
         keyStatusEl.dataset.state = state;
         const canSend = Boolean(selectedProviderStatus.configured) && !requestInFlight;
         sendButton.disabled = !canSend;
+        openJitaiBuilderButton.disabled = requestInFlight;
         sendButton.title = selectedProviderStatus.configured
           ? ""
           : `Add a ${providerKeyLabel(selectedProvider().id)} API key before sending.`;
+      }
+
+      function readJitaiDrafts() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(JITAI_DRAFT_STORAGE_KEY) || "[]");
+          return Array.isArray(parsed) ? parsed : [];
+        } catch (error) {
+          return [];
+        }
+      }
+
+      function writeJitaiDrafts() {
+        localStorage.setItem(JITAI_DRAFT_STORAGE_KEY, JSON.stringify(jitaiDrafts.slice(0, 50)));
+      }
+
+      function parseEntityIds(text) {
+        const matches = String(text || "").match(/\b[a-z_]+\.[a-z0-9_]+\b/gi) || [];
+        return [...new Set(matches.map((entity) => entity.toLowerCase()))].slice(0, 12);
+      }
+
+      function inferJitaiDraft(promptText) {
+        const prompt = String(promptText || "").trim();
+        const firstSentence = prompt.split(/[.!?]\s/).find(Boolean) || prompt;
+        return {
+          prompt,
+          trigger_condition: firstSentence ? firstSentence.slice(0, 220) : "",
+          intervention_message: "",
+          timing_window: /morning/i.test(prompt) ? "6:00 AM-10:00 AM" : /evening|night|bed/i.test(prompt) ? "7:00 PM-10:00 PM" : "",
+          cooldown_period: /daily|once a day/i.test(prompt) ? "24 hours" : "4 hours",
+          entities: parseEntityIds(prompt),
+          delivery_type: "notification",
+        };
+      }
+
+      function populateJitaiEntityOptions() {
+        jitaiEntityOptions.innerHTML = "";
+        for (const row of sensorMapRows || []) {
+          if (!row.sensor) continue;
+          const option = document.createElement("option");
+          option.value = row.sensor;
+          option.label = row.description || row.sensor;
+          jitaiEntityOptions.appendChild(option);
+        }
+      }
+
+      function renderJitaiEntityChips() {
+        jitaiEntityChips.innerHTML = "";
+        if (!jitaiSelectedEntities.length) {
+          const empty = document.createElement("span");
+          empty.className = "jitai-empty-entities";
+          empty.textContent = "No entities selected";
+          jitaiEntityChips.appendChild(empty);
+          return;
+        }
+        for (const entityId of jitaiSelectedEntities) {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "jitai-entity-chip";
+          chip.textContent = entityId;
+          chip.title = "Remove entity";
+          chip.addEventListener("click", () => {
+            jitaiSelectedEntities = jitaiSelectedEntities.filter((item) => item !== entityId);
+            renderJitaiEntityChips();
+          });
+          jitaiEntityChips.appendChild(chip);
+        }
+      }
+
+      function addJitaiEntity(entityId) {
+        const cleanEntityId = String(entityId || "").trim().toLowerCase();
+        if (!cleanEntityId || !cleanEntityId.includes(".")) return;
+        if (!jitaiSelectedEntities.includes(cleanEntityId)) {
+          jitaiSelectedEntities.push(cleanEntityId);
+        }
+        jitaiEntityInput.value = "";
+        renderJitaiEntityChips();
+      }
+
+      async function openJitaiModal() {
+        const draft = inferJitaiDraft(input.value);
+        jitaiPrompt.value = draft.prompt;
+        jitaiTrigger.value = draft.trigger_condition;
+        jitaiMessage.value = draft.intervention_message;
+        jitaiTimingWindow.value = draft.timing_window;
+        jitaiCooldown.value = draft.cooldown_period;
+        jitaiDeliveryType.value = draft.delivery_type;
+        jitaiSelectedEntities = draft.entities;
+        jitaiDraftStatus.textContent = "Draft only";
+        if (!sensorMapLoaded) {
+          await loadSensorMap();
+        }
+        populateJitaiEntityOptions();
+        renderJitaiEntityChips();
+        jitaiModal.hidden = false;
+        document.body.classList.add("modal-open");
+        requestAnimationFrame(() => jitaiTrigger.focus());
+      }
+
+      function closeJitaiModal() {
+        jitaiModal.hidden = true;
+        document.body.classList.remove("modal-open");
+        input.focus();
+      }
+
+      function jitaiDraftFromForm() {
+        return {
+          id: `jitai_${Date.now()}`,
+          created_at: new Date().toISOString(),
+          prompt: jitaiPrompt.value.trim(),
+          trigger_condition: jitaiTrigger.value.trim(),
+          intervention_message: jitaiMessage.value.trim(),
+          timing_window: jitaiTimingWindow.value.trim(),
+          cooldown_period: jitaiCooldown.value.trim(),
+          entities: [...jitaiSelectedEntities],
+          delivery_type: jitaiDeliveryType.value,
+          status: "draft",
+        };
+      }
+
+      function jitaiDraftMarkdown(draft) {
+        const entities = draft.entities.length ? draft.entities.map((entity) => `\`${entity}\``).join(", ") : "None selected";
+        const deliveryLabel = jitaiDeliveryType.options[jitaiDeliveryType.selectedIndex].textContent;
+        return [
+          "JITAI draft saved locally.",
+          "",
+          `- Trigger condition: ${draft.trigger_condition}`,
+          `- Intervention message: ${draft.intervention_message}`,
+          `- Timing window: ${draft.timing_window}`,
+          `- Cooldown period: ${draft.cooldown_period}`,
+          `- Sensors/entities: ${entities}`,
+          `- Delivery type: ${deliveryLabel}`,
+          "",
+          "This is a UI draft only; it does not create Home Assistant automations.",
+        ].join("\n");
       }
 
       async function refreshKeyStatus() {
@@ -1298,11 +1521,46 @@ claude_api_key: sk-ant-...</code></pre>
       });
 
       saveSensorMapButton.addEventListener("click", saveSensorMap);
+      openJitaiBuilderButton.addEventListener("click", openJitaiModal);
+      closeJitaiModalButton.addEventListener("click", closeJitaiModal);
+      cancelJitaiButton.addEventListener("click", closeJitaiModal);
+      jitaiModal.addEventListener("click", (event) => {
+        if (event.target === jitaiModal) {
+          closeJitaiModal();
+        }
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !jitaiModal.hidden) {
+          closeJitaiModal();
+        }
+      });
+      addJitaiEntityButton.addEventListener("click", () => addJitaiEntity(jitaiEntityInput.value));
+      jitaiEntityInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          addJitaiEntity(jitaiEntityInput.value);
+        }
+      });
+      jitaiForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const draft = jitaiDraftFromForm();
+        jitaiDrafts.unshift(draft);
+        writeJitaiDrafts();
+        jitaiDraftStatus.textContent = "Saved locally";
+        appendMessage({
+          role: "assistant",
+          content: jitaiDraftMarkdown(draft),
+          provider_label: "JITAI Builder",
+          model_label: "Draft",
+        }, { enter: true });
+        closeJitaiModal();
+      });
       keyHelpButton.addEventListener("click", () => {
         const shouldShow = keyHelpPanel.hidden;
         keyHelpPanel.hidden = !shouldShow;
         keyHelpButton.setAttribute("aria-expanded", String(shouldShow));
       });
+      jitaiDrafts = readJitaiDrafts();
       const savedProvider = localStorage.getItem(PROVIDER_STORAGE_KEY);
       const savedModel = localStorage.getItem(MODEL_STORAGE_KEY);
       if (PROVIDER_OPTIONS.some((provider) => provider.id === savedProvider)) {
