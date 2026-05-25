@@ -1,10 +1,10 @@
 # Agentic Prompt App
 
-![CI](https://github.com/resace3/Agentic_Prompt_App/actions/workflows/ci.yml/badge.svg)
+![Docker](https://img.shields.io/badge/docker-ready-blue)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Add--on-41BDF5)
-![Release](https://img.shields.io/github/v/release/resace3/Agentic_Prompt_App)
-![License](https://img.shields.io/github/license/resace3/Agentic_Prompt_App)
 ![Python](https://img.shields.io/badge/python-3.11-blue)
+![OpenAI](https://img.shields.io/badge/OpenAI-powered-412991?logo=openai)
+![Claude](https://img.shields.io/badge/Claude-powered-D97757)
 
 Home Assistant add-on repository for Prompt Flow, a saved-chat prompt app that can use OpenAI or Claude models with read-only Home Assistant context, mapped sensors, deterministic plots, Markdown tables, LaTeX, and generated analysis visuals.
 
