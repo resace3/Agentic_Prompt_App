@@ -118,6 +118,11 @@ jobs:
               if value is not None and not isinstance(value, dict):
                   errors.append(f"{key} must be a mapping when present")
 
+          if config.get("hassio_api") is not True:
+              errors.append("hassio_api must be true so Supervisor provides add-on API context")
+          if config.get("homeassistant_api") is not True:
+              errors.append("homeassistant_api must be true so the add-on can use Supervisor-routed Home Assistant API")
+
           # Home Assistant add-ons normally declare default options in config.yaml.
           # If a separate options.json is added later, keep it valid JSON; otherwise
           # absence is explicit and acceptable because config.yaml owns defaults.
@@ -159,6 +164,11 @@ jobs:
                       errors.append(f"ports should include {port_key} when ports are exposed")
 
           run_sh = addon_dir / "run.sh"
+          run_sh_text = run_sh.read_text(encoding="utf-8")
+          if not run_sh_text.startswith("#!/usr/bin/with-contenv sh\n"):
+              errors.append("run.sh must start through /usr/bin/with-contenv for Home Assistant add-on runtime")
+          if "HOME_ASSISTANT_API_URL" in run_sh_text:
+              errors.append("run.sh must not override the Supervisor Home Assistant API URL")
           source_mode = run_sh.stat().st_mode
           if not (source_mode & stat.S_IXUSR):
               dockerfile_text = (addon_dir / "Dockerfile").read_text(encoding="utf-8")

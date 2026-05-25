@@ -106,5 +106,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: frontend-rendering-artifacts
-          path: ${{ runner.temp }}/frontend-rendering-artifacts
+          path: /tmp/agentic-frontend-rendering/artifacts
           if-no-files-found: ignore

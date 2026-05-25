@@ -135,6 +135,43 @@ jobs:
           print("No high-confidence committed secret patterns found")
           PY
 
+      # Verifies Home Assistant API access stays Supervisor-scoped. The add-on
+      # must not support long-lived HA tokens or configurable API routes.
+      - name: Check Supervisor token-only Home Assistant access
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          app_source = Path("agentic_prompt_app/app.py").read_text(encoding="utf-8")
+          run_sh = Path("agentic_prompt_app/run.sh").read_text(encoding="utf-8")
+          config = Path("agentic_prompt_app/config.yaml").read_text(encoding="utf-8")
+          failures = []
+
+          if "HOME_ASSISTANT_TOKEN" in app_source:
+              failures.append("app.py must not read HOME_ASSISTANT_TOKEN or other long-lived HA token fallbacks")
+          if 'HOME_ASSISTANT_API_URL = "http://supervisor/core/api"' not in app_source:
+              failures.append("app.py must hardcode Supervisor Home Assistant API routing")
+          if 'return os.environ.get("SUPERVISOR_TOKEN")' not in app_source:
+              failures.append("app.py must read Home Assistant auth only from os.environ['SUPERVISOR_TOKEN']")
+          if '"Authorization": f"Bearer {token}"' not in app_source:
+              failures.append("Home Assistant API requests must use Bearer auth from the Supervisor token")
+          if not run_sh.startswith("#!/usr/bin/with-contenv sh\n"):
+              failures.append("run.sh must start through /usr/bin/with-contenv")
+          if "HOME_ASSISTANT_API_URL" in run_sh:
+              failures.append("run.sh must not override Supervisor Home Assistant API URL")
+          if "hassio_api: true" not in config or "homeassistant_api: true" not in config:
+              failures.append("config.yaml must enable hassio_api and homeassistant_api")
+
+          if failures:
+              for failure in failures:
+                  print(failure)
+              sys.exit(1)
+
+          print("Supervisor token-only Home Assistant access check passed")
+          PY
+
       # Verifies workflows do not use broad write-all permissions or floating
       # action refs such as @main/@master. This workflow owns lint/security, so
       # it enforces read-only permissions for itself without editing tests.yml.
