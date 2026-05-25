@@ -196,10 +196,9 @@ claude_api_key: sk-ant-...</code></pre>
         const rawText = await response.text();
         console.log("Fetch response", {
           path,
-          url,
           status: response.status,
           contentType,
-          rawText: redactForLog(rawText).slice(0, 600),
+          bodyLength: rawText.length,
         });
 
         let data = {};

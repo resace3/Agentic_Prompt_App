@@ -12,6 +12,7 @@ url: https://github.com/resace3/Agentic_Prompt_App
 startup: services
 boot: auto
 init: false
+hassio_api: true
 homeassistant_api: true
 ingress: true
 ingress_port: 5000
