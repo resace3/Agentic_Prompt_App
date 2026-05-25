@@ -17,7 +17,10 @@ COPY config.yaml .
 COPY templates ./templates
 COPY static ./static
 COPY run.sh .
-RUN chmod +x /app/run.sh
+RUN if [ ! -x /usr/bin/with-contenv ]; then \
+        printf '%s\n' '#!/bin/sh' 'exec "$@"' > /usr/bin/with-contenv && chmod +x /usr/bin/with-contenv; \
+    fi && \
+    chmod +x /app/run.sh
 
 EXPOSE 5000
 CMD ["/app/run.sh"]
