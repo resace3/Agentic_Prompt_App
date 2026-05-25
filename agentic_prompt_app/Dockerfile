@@ -14,6 +14,7 @@ RUN if command -v apk >/dev/null 2>&1; then \
 
 COPY app.py .
 COPY jitai_engine.py .
+COPY jitai_learning.py .
 COPY config.yaml .
 COPY templates ./templates
 COPY static ./static

@@ -30,6 +30,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 import yaml
 from flask import Flask, jsonify, render_template, request, session
+from jitai_learning import context_breakdown, effectiveness_metrics, record_response, suggest_improvements
 from openai import OpenAI
 from werkzeug.exceptions import HTTPException
 
@@ -4709,6 +4710,36 @@ def sensor_data():
         return api_error_response(str(exc), status=400, error_type="sensor_data_failed")
 
     return jsonify(data)
+
+
+@app.post("/api/jitai/responses")
+def jitai_responses():
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = record_response(payload)
+    except ValueError as exc:
+        return api_error_response(str(exc), status=400, error_type="invalid_jitai_response")
+    return jsonify(api_success(result))
+
+
+@app.get("/api/jitai/metrics")
+def jitai_metrics():
+    return jsonify(
+        api_success(
+            {
+                "metrics": effectiveness_metrics(),
+                "context_breakdown": context_breakdown(),
+                "suggestions": suggest_improvements(),
+            }
+        )
+    )
+
+
+@app.post("/api/jitai/suggestions")
+def jitai_suggestions():
+    payload = request.get_json(silent=True) or {}
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    return jsonify(api_success({"suggestions": suggest_improvements(context=context)}))
 
 
 def jitai_api_error(exc):

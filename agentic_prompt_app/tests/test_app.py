@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import sqlite3
 import subprocess
@@ -25,9 +26,11 @@ class PromptAppTests(unittest.TestCase):
         self.previous_claude_key = os.environ.get("CLAUDE_API_KEY")
         self.previous_secrets_yaml = os.environ.get("SECRETS_YAML")
         self.previous_recorder_db_path = os.environ.get("HA_RECORDER_DB_PATH")
+        self.previous_jitai_learning_path = os.environ.get("JITAI_LEARNING_PATH")
         self.previous_jitai_store_path = os.environ.get("JITAI_STORE_PATH")
         os.environ["SENSOR_MAP_PATH"] = os.path.join(self.temp_dir.name, "sensor_map.json")
         os.environ["CHAT_STORE_PATH"] = os.path.join(self.temp_dir.name, "chat_history.json")
+        os.environ["JITAI_LEARNING_PATH"] = os.path.join(self.temp_dir.name, "jitai_learning.json")
         os.environ["JITAI_STORE_PATH"] = os.path.join(self.temp_dir.name, "jitai_store.json")
         os.environ["OPENAI_API_KEY"] = "test-openai-key"
         os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
@@ -66,6 +69,10 @@ class PromptAppTests(unittest.TestCase):
             os.environ.pop("HA_RECORDER_DB_PATH", None)
         else:
             os.environ["HA_RECORDER_DB_PATH"] = self.previous_recorder_db_path
+        if self.previous_jitai_learning_path is None:
+            os.environ.pop("JITAI_LEARNING_PATH", None)
+        else:
+            os.environ["JITAI_LEARNING_PATH"] = self.previous_jitai_learning_path
         if self.previous_jitai_store_path is None:
             os.environ.pop("JITAI_STORE_PATH", None)
         else:
@@ -414,6 +421,107 @@ class PromptAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("manually in Home Assistant", data["assistant"])
         self.assertEqual(data["messages"][-1]["manual_action_required"]["type"], "delete_addon")
+
+    def test_jitai_learning_tracks_accept_dismiss_rates_and_scores(self):
+        first = self.client.post(
+            "/api/jitai/responses",
+            json={
+                "intervention_id": "nudge-1",
+                "response": "accept",
+                "suggested_at": "2026-05-25T08:10:00Z",
+                "responded_at": "2026-05-25T08:11:00Z",
+                "message_key": "morning_checkin",
+                "message": "Take a short walk?",
+                "response_latency_seconds": 60,
+                "context": {
+                    "goal": "activity",
+                    "entity_ids": ["sensor.steps"],
+                    "time_window": "morning",
+                    "units": "steps",
+                },
+            },
+        )
+        second = self.client.post(
+            "/api/jitai/responses",
+            json={
+                "intervention_id": "nudge-2",
+                "response": "dismiss",
+                "suggested_at": "2026-05-25T08:20:00Z",
+                "responded_at": "2026-05-25T08:20:30Z",
+                "message_key": "morning_checkin",
+                "message": "Take a short walk?",
+                "response_latency_seconds": 30,
+                "context": {
+                    "goal": "activity",
+                    "entity_ids": ["sensor.steps"],
+                    "time_window": "morning",
+                    "units": "steps",
+                },
+            },
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        metrics = self.client.get("/api/jitai/metrics").get_json()["metrics"]
+        self.assertEqual(metrics["total_events"], 2)
+        self.assertEqual(metrics["overall"]["accepted"], 1)
+        self.assertEqual(metrics["overall"]["dismissed"], 1)
+        self.assertEqual(metrics["overall"]["accept_rate"], 0.5)
+        self.assertEqual(metrics["overall"]["dismiss_rate"], 0.5)
+        timing = next(item for item in metrics["timing_buckets"] if item["key"] == "08:00")
+        self.assertEqual(timing["shown"], 2)
+        self.assertLess(timing["score"], 1)
+        self.assertIn("response_latency_seconds", metrics)
+
+    def test_jitai_learning_suggests_best_timing_and_message(self):
+        cases = [
+            ("accept", "2026-05-25T07:05:00Z", "gentle_walk", "A short walk now may help."),
+            ("accept", "2026-05-26T07:10:00Z", "gentle_walk", "A short walk now may help."),
+            ("dismiss", "2026-05-25T22:05:00Z", "late_alert", "Do a workout before bed?"),
+            ("dismiss", "2026-05-26T22:10:00Z", "late_alert", "Do a workout before bed?"),
+            ("ignore", "2026-05-27T12:10:00Z", "midday_note", "Stretch break?"),
+        ]
+        for index, (response, suggested_at, message_key, message) in enumerate(cases):
+            result = self.client.post(
+                "/api/jitai/responses",
+                json={
+                    "intervention_id": f"nudge-{index}",
+                    "response": response,
+                    "suggested_at": suggested_at,
+                    "message_key": message_key,
+                    "message": message,
+                    "context": {"goal": "activity"},
+                },
+            )
+            self.assertEqual(result.status_code, 200)
+
+        suggestions = self.client.post(
+            "/api/jitai/suggestions",
+            json={"context": {"goal": "activity", "entity_ids": ["sensor.steps"]}},
+        ).get_json()["suggestions"]
+        self.assertEqual(suggestions["recommended_timing_bucket"], "07:00")
+        self.assertEqual(suggestions["recommended_message_key"], "gentle_walk")
+        self.assertEqual(suggestions["recommended_message"], "A short walk now may help.")
+        self.assertIn("22:00", suggestions["avoid_timing_buckets"])
+        self.assertEqual(suggestions["basis"]["confidence"], "learned")
+
+    def test_jitai_learning_redacts_secret_like_metric_output(self):
+        response = self.client.post(
+            "/api/jitai/responses",
+            json={
+                "intervention_id": "secret-test",
+                "response": "accept",
+                "suggested_at": "2026-05-25T09:00:00Z",
+                "message_key": "api_key: sk-testsecret123456",
+                "message": "Use token=abc123456789 before the walk",
+                "context": {"goal": "secret=abc123456789", "entity_ids": ["sensor.steps"]},
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload_text = json.dumps(self.client.get("/api/jitai/metrics").get_json())
+        self.assertNotIn("sk-testsecret123456", payload_text)
+        self.assertNotIn("abc123456789", payload_text)
+        self.assertIn("[redacted]", payload_text)
 
     def test_prompt_context_searches_recorder_db_for_unmapped_steps_sensor(self):
         self.write_fake_recorder_db(
